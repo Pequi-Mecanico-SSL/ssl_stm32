@@ -49,22 +49,22 @@ void pwm_setup(void) {
     // Channel 1 on PA8
     timer_set_oc_mode(TIM1, TIM_OC1, TIM_OCM_PWM1);
     timer_enable_oc_output(TIM1, TIM_OC1);  // Enable output compare on channel 1
-    timer_set_oc_value(TIM1, TIM_OC1, 100);  // duty cycle
+    timer_set_oc_value(TIM1, TIM_OC1, 0);  // duty cycle
 
     // Channel 2 on PA9
     timer_set_oc_mode(TIM1, TIM_OC2, TIM_OCM_PWM1);
     timer_enable_oc_output(TIM1, TIM_OC2);  // Enable output compare on channel 2
-    timer_set_oc_value(TIM1, TIM_OC2, 100);  // duty cycle
+    timer_set_oc_value(TIM1, TIM_OC2, 0);  // duty cycle
 
     // Channel 3 on PA10
     timer_set_oc_mode(TIM1, TIM_OC3, TIM_OCM_PWM1);
     timer_enable_oc_output(TIM1, TIM_OC3);  // Enable output compare on channel 3
-    timer_set_oc_value(TIM1, TIM_OC3, 100);  // duty cycle
+    timer_set_oc_value(TIM1, TIM_OC3, 0);  // duty cycle
 
     // Channel 4 on PA11
     timer_set_oc_mode(TIM1, TIM_OC4, TIM_OCM_PWM1);
     timer_enable_oc_output(TIM1, TIM_OC4);  // Enable output compare on channel 4
-    timer_set_oc_value(TIM1, TIM_OC4, 100);  // duty cycle
+    timer_set_oc_value(TIM1, TIM_OC4, 0);  // duty cycle
 
     // Enable Timer1 counter and output
     timer_enable_preload(TIM1);
@@ -121,9 +121,11 @@ void spi_slave_setup(void) {
 // }
 
 
-#define BUFFER_SIZE 16  // Define the number of bytes to transfer
-uint8_t tx_buffer[BUFFER_SIZE];  // Buffer to hold data to send
-uint8_t rx_buffer[BUFFER_SIZE];  // Buffer to hold received data
+// #define BUFFER_SIZE 16  // Define the number of bytes to transfer
+// uint8_t tx_buffer[BUFFER_SIZE];  // Buffer to hold data to send
+// uint8_t rx_buffer[BUFFER_SIZE];  // Buffer to hold received data
+uint32_t velocity_cmd[4];  // Buffer to hold data to send
+uint32_t current_velocity[4];  // Buffer to hold received data
 
 void dma_setup(void) {
     /* Enable DMA1 clock */
@@ -132,8 +134,8 @@ void dma_setup(void) {
     /* Configure DMA channel for SPI1 RX (DMA1 Channel 2) */
     dma_channel_reset(DMA1, DMA_CHANNEL2);
     dma_set_peripheral_address(DMA1, DMA_CHANNEL2, (uint32_t)&SPI1_DR); // SPI data register
-    dma_set_memory_address(DMA1, DMA_CHANNEL2, (uint32_t)rx_buffer); // RX buffer
-    dma_set_number_of_data(DMA1, DMA_CHANNEL2, BUFFER_SIZE); // Transfer size
+    dma_set_memory_address(DMA1, DMA_CHANNEL2, (uint32_t)velocity_cmd); // RX buffer
+    dma_set_number_of_data(DMA1, DMA_CHANNEL2, sizeof(velocity_cmd)); // Transfer size
     dma_set_read_from_peripheral(DMA1, DMA_CHANNEL2);
     dma_enable_memory_increment_mode(DMA1, DMA_CHANNEL2);
     dma_set_peripheral_size(DMA1, DMA_CHANNEL2, DMA_CCR_PSIZE_8BIT);
@@ -144,14 +146,17 @@ void dma_setup(void) {
     /* Configure DMA channel for SPI1 TX (DMA1 Channel 3) */
     dma_channel_reset(DMA1, DMA_CHANNEL3);
     dma_set_peripheral_address(DMA1, DMA_CHANNEL3, (uint32_t)&SPI1_DR); // SPI data register
-    dma_set_memory_address(DMA1, DMA_CHANNEL3, (uint32_t)tx_buffer); // TX buffer
-    dma_set_number_of_data(DMA1, DMA_CHANNEL3, BUFFER_SIZE); // Transfer size
+    dma_set_memory_address(DMA1, DMA_CHANNEL3, (uint32_t)current_velocity); // TX buffer
+    dma_set_number_of_data(DMA1, DMA_CHANNEL3, sizeof(current_velocity)); // Transfer size
     dma_set_read_from_memory(DMA1, DMA_CHANNEL3);
     dma_enable_memory_increment_mode(DMA1, DMA_CHANNEL3);
     dma_set_peripheral_size(DMA1, DMA_CHANNEL3, DMA_CCR_PSIZE_8BIT);
     dma_set_memory_size(DMA1, DMA_CHANNEL3, DMA_CCR_MSIZE_8BIT);
     dma_set_priority(DMA1, DMA_CHANNEL3, DMA_CCR_PL_HIGH);
     dma_enable_transfer_complete_interrupt(DMA1, DMA_CHANNEL3);
+
+    nvic_enable_irq(NVIC_DMA1_CHANNEL2_IRQ);  // Enable DMA1 Channel 2 interrupt
+    nvic_enable_irq(NVIC_DMA1_CHANNEL3_IRQ);  // Enable DMA1 Channel 3 interrupt
 
     /* Enable DMA channels */
     dma_enable_channel(DMA1, DMA_CHANNEL2); // RX
@@ -165,12 +170,14 @@ extern "C" void dma1_channel2_isr(void) {  // RX complete
         /* Handle received data */
         // Process or store data in rx_buffer here
         // for (int i = 0; i < BUFFER_SIZE; i++) {
-        //     tx_buffer[i] = rx_buffer[i] * 4;
+        //     tx_buffer[i] = rx_buffer[i] * 2;
         // }
 
         /* Re-enable the DMA channel for the next transfer */
-        dma_set_memory_address(DMA1, DMA_CHANNEL2, (uint32_t)rx_buffer);
-        dma_set_number_of_data(DMA1, DMA_CHANNEL2, BUFFER_SIZE);
+        // spi_enable_rx_dma(SPI1);
+        dma_disable_channel(DMA1, DMA_CHANNEL2);
+        dma_set_memory_address(DMA1, DMA_CHANNEL2, (uint32_t)velocity_cmd);
+        dma_set_number_of_data(DMA1, DMA_CHANNEL2, sizeof(velocity_cmd));
         dma_enable_channel(DMA1, DMA_CHANNEL2);
     }
 }
@@ -183,8 +190,9 @@ extern "C" void dma1_channel3_isr(void) {  // TX complete
         // Prepare new data in tx_buffer if needed
 
         /* Re-enable the DMA channel for the next transfer */
-        dma_set_memory_address(DMA1, DMA_CHANNEL3, (uint32_t)tx_buffer);
-        dma_set_number_of_data(DMA1, DMA_CHANNEL3, BUFFER_SIZE);
+        dma_disable_channel(DMA1, DMA_CHANNEL3);
+        dma_set_memory_address(DMA1, DMA_CHANNEL3, (uint32_t)current_velocity);
+        dma_set_number_of_data(DMA1, DMA_CHANNEL3, sizeof(current_velocity));
         dma_enable_channel(DMA1, DMA_CHANNEL3);
     }
 }
@@ -197,34 +205,35 @@ int main(void) {
     pwm_setup();
     dma_setup();
     spi_slave_setup();
+    for (int i = 0; i < 4; i++) {
+        velocity_cmd[i] = 0;
+        current_velocity[i] = 0;
+    }
 
-    int vals[] = {0, 200, 400, 600};
+    // int vals[] = {0, 200, 400, 600};
     while (1) {
         gpio_toggle(GPIOC, GPIO13);
-        delay(200);
+        delay(500);
         // timer_set_oc_value(TIM1, TIM_OC1, 100);
-        for (int i = 0; i < 4; i++) {
-            vals[i] += 100;
-            if (vals[i] > 1000) {
-                vals[i] = 0;
-            }
-        }
-        timer_set_oc_value(TIM1, TIM_OC1, vals[0]);
-        timer_set_oc_value(TIM1, TIM_OC2, vals[1]);
-        timer_set_oc_value(TIM1, TIM_OC3, vals[2]);
-        timer_set_oc_value(TIM1, TIM_OC4, vals[3]);
+        // for (int i = 0; i < 4; i++) {
+        //     vals[i] += 100;
+        //     if (vals[i] > 1000) {
+        //         vals[i] = 0;
+        //     }
+        // }
+        // timer_set_oc_value(TIM1, TIM_OC1, vals[0]);
+        // timer_set_oc_value(TIM1, TIM_OC2, vals[1]);
+        // timer_set_oc_value(TIM1, TIM_OC3, vals[2]);
+        // timer_set_oc_value(TIM1, TIM_OC4, vals[3]);
 
-        for (int i = 0; i < BUFFER_SIZE; i++) {
-            tx_buffer[i] = i * 2;
-        }
-        // return 0;
-
-        // uint8_t received_data = spi_receive_data();
-        // // timer_set_oc_value(TIM1, TIM_OC1, 0);
-        // // timer_set_oc_value(TIM1, TIM_OC2, 0);
-        // // timer_set_oc_value(TIM1, TIM_OC3, 0);
-        // // timer_set_oc_value(TIM1, TIM_OC4, 0);
-        // spi_send_data(received_data * 2);
+        timer_set_oc_value(TIM1, TIM_OC1, velocity_cmd[0]);
+        timer_set_oc_value(TIM1, TIM_OC2, velocity_cmd[1]);
+        timer_set_oc_value(TIM1, TIM_OC3, velocity_cmd[2]);
+        timer_set_oc_value(TIM1, TIM_OC4, velocity_cmd[3]);
+        current_velocity[0] = velocity_cmd[0];
+        current_velocity[1] = velocity_cmd[1];
+        current_velocity[2] = velocity_cmd[2];
+        current_velocity[3] = velocity_cmd[3];
     }
     return 0;
 }
