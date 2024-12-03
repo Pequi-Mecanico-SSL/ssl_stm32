@@ -32,6 +32,27 @@ static void gpio_setup(void) {
                   GPIO_CNF_OUTPUT_PUSHPULL, GPIO13);
 }
 
+int pwm_timer_period = 1000; // Period = 1000, for 1 kHz PWM frequency
+void set_pwm(int channel, float duty_cycle) {
+    int value = int(duty_cycle * (pwm_timer_period/100.0));
+    switch (channel) {
+        case 1:
+            timer_set_oc_value(TIM1, TIM_OC1, value);
+            break;
+        case 2:
+            timer_set_oc_value(TIM1, TIM_OC2, value);
+            break;
+        case 3:
+            timer_set_oc_value(TIM1, TIM_OC3, value);
+            break;
+        case 4:
+            timer_set_oc_value(TIM1, TIM_OC4, value);
+            break;
+        default:
+            break;
+    }
+}
+
 
 void pwm_setup(void) {
     // 1. Enable clocks for GPIOA and Timer1
@@ -43,28 +64,29 @@ void pwm_setup(void) {
 
     // 3. Set up Timer1 for PWM mode
     timer_set_prescaler(TIM1, 72 - 1);  // Prescaler = 72, for 1 MHz timer frequency
-    timer_set_period(TIM1, 1000);  // Period = 1000, for 1 kHz PWM frequency
+    timer_set_period(TIM1, pwm_timer_period-1);
 
     // Set the PWM mode to mode 1 (active when counter < CCRx) for each channel
     // Channel 1 on PA8
     timer_set_oc_mode(TIM1, TIM_OC1, TIM_OCM_PWM1);
     timer_enable_oc_output(TIM1, TIM_OC1);  // Enable output compare on channel 1
-    timer_set_oc_value(TIM1, TIM_OC1, 0);  // duty cycle
+    // timer_set_oc_value(TIM1, TIM_OC1, int(0 * (freq/100.0)));  // duty cycle
+    set_pwm(1, 0);
 
     // Channel 2 on PA9
     timer_set_oc_mode(TIM1, TIM_OC2, TIM_OCM_PWM1);
     timer_enable_oc_output(TIM1, TIM_OC2);  // Enable output compare on channel 2
-    timer_set_oc_value(TIM1, TIM_OC2, 0);  // duty cycle
+    set_pwm(2, 0);  // duty cycle
 
     // Channel 3 on PA10
     timer_set_oc_mode(TIM1, TIM_OC3, TIM_OCM_PWM1);
     timer_enable_oc_output(TIM1, TIM_OC3);  // Enable output compare on channel 3
-    timer_set_oc_value(TIM1, TIM_OC3, 0);  // duty cycle
+    set_pwm(3, 0);  // duty cycle
 
     // Channel 4 on PA11
     timer_set_oc_mode(TIM1, TIM_OC4, TIM_OCM_PWM1);
     timer_enable_oc_output(TIM1, TIM_OC4);  // Enable output compare on channel 4
-    timer_set_oc_value(TIM1, TIM_OC4, 0);  // duty cycle
+    set_pwm(4, 0);  // duty cycle
 
     // Enable Timer1 counter and output
     timer_enable_preload(TIM1);
@@ -81,14 +103,19 @@ void spi_slave_setup(void) {
     gpio_set_mode(GPIOA, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, GPIO5);  // SCK
     gpio_set_mode(GPIOA, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, GPIO6);  // MISO
     gpio_set_mode(GPIOA, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, GPIO7);  // MOSI
+    gpio_set_mode(GPIOA, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, GPIO4);  // NSS
 
     // Configure SPI1 for slave mode
     spi_init_master(SPI1, SPI_CR1_BAUDRATE_FPCLK_DIV_256, SPI_CR1_CPOL_CLK_TO_0_WHEN_IDLE,
                     SPI_CR1_CPHA_CLK_TRANSITION_1, SPI_CR1_DFF_8BIT, SPI_CR1_MSBFIRST);
 
     spi_set_slave_mode(SPI1);  // Set SPI1 to slave mode
-    spi_enable_software_slave_management(SPI1);  // Enable software NSS management
-    spi_set_nss_low(SPI1);  // Set NSS to low
+
+    //spi_enable_software_slave_management(SPI1);  // Enable software NSS management
+    //spi_set_nss_low(SPI1);  // Set NSS to low
+    spi_disable_software_slave_management(SPI1);  // Disable software NSS management
+    spi_disable_ss_output(SPI1);  // Disable slave select output
+
     // spi_enable_rx_buffer_not_empty_interrupt(SPI1);
     // nvic_enable_irq(NVIC_SPI1_IRQ);
 
@@ -121,11 +148,11 @@ void spi_slave_setup(void) {
 // }
 
 
-// #define BUFFER_SIZE 16  // Define the number of bytes to transfer
-// uint8_t tx_buffer[BUFFER_SIZE];  // Buffer to hold data to send
-// uint8_t rx_buffer[BUFFER_SIZE];  // Buffer to hold received data
-uint32_t velocity_cmd[4];  // Buffer to hold data to send
-uint32_t current_velocity[4];  // Buffer to hold received data
+#define BUFFER_SIZE 4  // Define the number of bytes to transfer
+float tx_buffer[BUFFER_SIZE];  // Buffer to hold data to send
+float rx_buffer[BUFFER_SIZE];  // Buffer to hold received data
+// volatile uint32_t velocity_cmd[4];  // Buffer to hold data to send
+// volatile uint32_t current_velocity[4];  // Buffer to hold received data
 
 void dma_setup(void) {
     /* Enable DMA1 clock */
@@ -134,8 +161,8 @@ void dma_setup(void) {
     /* Configure DMA channel for SPI1 RX (DMA1 Channel 2) */
     dma_channel_reset(DMA1, DMA_CHANNEL2);
     dma_set_peripheral_address(DMA1, DMA_CHANNEL2, (uint32_t)&SPI1_DR); // SPI data register
-    dma_set_memory_address(DMA1, DMA_CHANNEL2, (uint32_t)velocity_cmd); // RX buffer
-    dma_set_number_of_data(DMA1, DMA_CHANNEL2, sizeof(velocity_cmd)); // Transfer size
+    dma_set_memory_address(DMA1, DMA_CHANNEL2, (uint32_t)rx_buffer); // RX buffer
+    dma_set_number_of_data(DMA1, DMA_CHANNEL2, sizeof(rx_buffer)); // Transfer size
     dma_set_read_from_peripheral(DMA1, DMA_CHANNEL2);
     dma_enable_memory_increment_mode(DMA1, DMA_CHANNEL2);
     dma_set_peripheral_size(DMA1, DMA_CHANNEL2, DMA_CCR_PSIZE_8BIT);
@@ -146,8 +173,8 @@ void dma_setup(void) {
     /* Configure DMA channel for SPI1 TX (DMA1 Channel 3) */
     dma_channel_reset(DMA1, DMA_CHANNEL3);
     dma_set_peripheral_address(DMA1, DMA_CHANNEL3, (uint32_t)&SPI1_DR); // SPI data register
-    dma_set_memory_address(DMA1, DMA_CHANNEL3, (uint32_t)current_velocity); // TX buffer
-    dma_set_number_of_data(DMA1, DMA_CHANNEL3, sizeof(current_velocity)); // Transfer size
+    dma_set_memory_address(DMA1, DMA_CHANNEL3, (uint32_t)tx_buffer); // TX buffer
+    dma_set_number_of_data(DMA1, DMA_CHANNEL3, sizeof(tx_buffer)); // Transfer size
     dma_set_read_from_memory(DMA1, DMA_CHANNEL3);
     dma_enable_memory_increment_mode(DMA1, DMA_CHANNEL3);
     dma_set_peripheral_size(DMA1, DMA_CHANNEL3, DMA_CCR_PSIZE_8BIT);
@@ -176,44 +203,72 @@ extern "C" void dma1_channel2_isr(void) {  // RX complete
         /* Re-enable the DMA channel for the next transfer */
         // spi_enable_rx_dma(SPI1);
         dma_disable_channel(DMA1, DMA_CHANNEL2);
-        dma_set_memory_address(DMA1, DMA_CHANNEL2, (uint32_t)velocity_cmd);
-        dma_set_number_of_data(DMA1, DMA_CHANNEL2, sizeof(velocity_cmd));
+        dma_set_memory_address(DMA1, DMA_CHANNEL2, (uint32_t)rx_buffer);
+        dma_set_number_of_data(DMA1, DMA_CHANNEL2, sizeof(rx_buffer));
         dma_enable_channel(DMA1, DMA_CHANNEL2);
+        // dma_clear_interrupt_flags(DMA1, DMA_CHANNEL2, DMA_TCIF);
     }
 }
 
+// volatile int sent = 10000;
 extern "C" void dma1_channel3_isr(void) {  // TX complete
     if (dma_get_interrupt_flag(DMA1, DMA_CHANNEL3, DMA_TCIF)) {
         dma_clear_interrupt_flags(DMA1, DMA_CHANNEL3, DMA_TCIF);
 
         /* Transmission is complete, prepare for next transfer */
         // Prepare new data in tx_buffer if needed
+        // sent += 1000;
 
         /* Re-enable the DMA channel for the next transfer */
         dma_disable_channel(DMA1, DMA_CHANNEL3);
-        dma_set_memory_address(DMA1, DMA_CHANNEL3, (uint32_t)current_velocity);
-        dma_set_number_of_data(DMA1, DMA_CHANNEL3, sizeof(current_velocity));
+        dma_set_memory_address(DMA1, DMA_CHANNEL3, (uint32_t)tx_buffer);
+        dma_set_number_of_data(DMA1, DMA_CHANNEL3, sizeof(tx_buffer));
         dma_enable_channel(DMA1, DMA_CHANNEL3);
+        // dma_clear_interrupt_flags(DMA1, DMA_CHANNEL3, DMA_TCIF);
+    }
+}
+
+// #define DIRO GPIO12
+// #define TACHO GPIO15
+#define BRAKE GPIO14
+#define DIR GPIO13
+
+void set_gpio(int pin, int state) {
+    gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_2_MHZ,
+                  GPIO_CNF_OUTPUT_PUSHPULL, pin);
+    if (state) {
+        gpio_set(GPIOB, pin);
+    } else {
+        gpio_clear(GPIOB, pin);
     }
 }
 
 
 int main(void) {
     rcc_clock_setup_pll(&rcc_hse_configs[RCC_CLOCK_HSE8_72MHZ]);
+    // rcc_clock_setup_in_hse_8mhz_out_72mhz();
     systick_setup();
     gpio_setup();
     pwm_setup();
     dma_setup();
     spi_slave_setup();
-    for (int i = 0; i < 4; i++) {
-        velocity_cmd[i] = 0;
-        current_velocity[i] = 0;
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        rx_buffer[i] = 0.0;
+        tx_buffer[i] = 0.0;
     }
 
+    rcc_periph_clock_enable(RCC_GPIOB);
+    
+    set_gpio(DIR, 0);
+    set_gpio(BRAKE, 1);
+
+    set_pwm(1, 75);
+
     // int vals[] = {0, 200, 400, 600};
+    // int j = 1;
     while (1) {
         gpio_toggle(GPIOC, GPIO13);
-        delay(500);
+        delay(10);
         // timer_set_oc_value(TIM1, TIM_OC1, 100);
         // for (int i = 0; i < 4; i++) {
         //     vals[i] += 100;
@@ -226,14 +281,46 @@ int main(void) {
         // timer_set_oc_value(TIM1, TIM_OC3, vals[2]);
         // timer_set_oc_value(TIM1, TIM_OC4, vals[3]);
 
-        timer_set_oc_value(TIM1, TIM_OC1, velocity_cmd[0]);
-        timer_set_oc_value(TIM1, TIM_OC2, velocity_cmd[1]);
-        timer_set_oc_value(TIM1, TIM_OC3, velocity_cmd[2]);
-        timer_set_oc_value(TIM1, TIM_OC4, velocity_cmd[3]);
-        current_velocity[0] = velocity_cmd[0];
-        current_velocity[1] = velocity_cmd[1];
-        current_velocity[2] = velocity_cmd[2];
-        current_velocity[3] = velocity_cmd[3];
+        // timer_set_oc_value(TIM1, TIM_OC1, velocity_cmd[0]);
+        // timer_set_oc_value(TIM1, TIM_OC2, velocity_cmd[1]);
+        // timer_set_oc_value(TIM1, TIM_OC3, velocity_cmd[2]);
+        // timer_set_oc_value(TIM1, TIM_OC4, velocity_cmd[3]);
+        // current_velocity[0] = velocity_cmd[0];
+        // current_velocity[1] = velocity_cmd[1];
+        // current_velocity[2] = velocity_cmd[2];
+        // current_velocity[3] = velocity_cmd[3];
+
+        // for (int i = 0; i < BUFFER_SIZE; i++) {
+        //     tx_buffer[i] = rx_buffer[i];
+        // }
+        // while(dma_get_interrupt_flag(DMA1, DMA_CHANNEL3, DMA_TCIF));
+        // if (dma_get_interrupt_flag(DMA1, DMA_CHANNEL2, DMA_TCIF)) {
+        //     gpio_set(GPIOC, GPIO13);
+        // } else {
+        //     gpio_clear(GPIOC, GPIO13);
+        // }
+
+        // only write if the ss is high
+        if (gpio_get(GPIOA, GPIO4)) {
+            static_assert(BUFFER_SIZE == 4);
+            //set_pwm(1, int(rx_buffer[0]));
+            //set_pwm(2, int(rx_buffer[1]));
+            //set_pwm(3, int(rx_buffer[2]));
+            //set_pwm(4, int(rx_buffer[3]));
+            for (int i = 0; i < BUFFER_SIZE; i++) {
+                set_pwm(i + 1, rx_buffer[i]);
+            }
+            for (int i = 0; i < BUFFER_SIZE; i++) {
+                tx_buffer[i] = rx_buffer[i];
+            }
+            spi_write(SPI1, tx_buffer[0]);
+        }
+        //for (int i = 0; i < BUFFER_SIZE; i++) {
+        //    tx_buffer[i] = j + i;
+        //}
+        //spi_write(SPI1, tx_buffer[0]);
+        //spi_enable_tx_dma(SPI1);
+        // j++;
     }
     return 0;
 }
