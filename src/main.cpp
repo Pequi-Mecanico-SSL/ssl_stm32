@@ -7,6 +7,39 @@
 #include <libopencm3/cm3/nvic.h>
 #include <libopencm3/stm32/dma.h>
 
+#define CAPTURE_BUFFER_SIZE 64
+volatile uint16_t capture_buffer[CAPTURE_BUFFER_SIZE];
+
+static void timer_capture_setup(void) {
+    rcc_periph_clock_enable(RCC_TIM2);
+    
+    // Reset TIM2 just to be sure
+    rcc_periph_reset_pulse(RST_TIM2);
+
+    // Timer base configuration
+    // For example, let's say we leave the timer running at full clock with no prescaler
+    timer_set_prescaler(TIM2, 0);
+    // Set an ARR if you want, for period. For input capture, ARR often not critical.
+    // If you want a free-running timer:
+    timer_set_period(TIM2, 0xFFFF);
+
+    // Configure CH1 as input capture on TI1
+    // Input capture mapped on channel 1 (TI1) with rising edge detection
+    timer_ic_set_input(TIM2, TIM_IC1, TIM_IC_IN_TI1);
+    timer_ic_set_polarity(TIM2, TIM_IC1, TIM_IC_RISING);
+    timer_ic_set_prescaler(TIM2, TIM_IC1, TIM_IC_PSC_OFF); 
+    timer_ic_set_filter(TIM2, TIM_IC1, TIM_IC_OFF);
+
+    // Enable update and CC interrupts if needed (for debug), but not mandatory since DMA is handling data
+    // timer_enable_irq(TIM2, TIM_DIER_CC1DE); // CC1 DMA request enable. We'll do this differently via direct reg access.
+
+    // Just ensure the CC1DE (capture/compare 1 DMA request enable) is set:
+    TIM_DIER(TIM2) |= TIM_DIER_CC1DE;
+
+    // Start the timer
+    timer_enable_counter(TIM2);
+}
+
 static volatile uint64_t _millis = 0;
 
 extern "C" void sys_tick_handler(void) {
@@ -190,6 +223,37 @@ void dma_setup(void) {
     dma_enable_channel(DMA1, DMA_CHANNEL3); // TX
 }
 
+static void timer_dma_setup(void) {
+    // Disable DMA channel first, if previously enabled
+    dma_channel_reset(DMA1, DMA_CHANNEL5);
+
+    // Configure the DMA channel:
+    // Peripheral address: TIM2_CCR1 register (capture/compare 1 register)
+    dma_set_peripheral_address(DMA1, DMA_CHANNEL5, (uint32_t)&TIM_CCR1(TIM2));
+    // Memory address: our capture_buffer
+    dma_set_memory_address(DMA1, DMA_CHANNEL5, (uint32_t)capture_buffer);
+    // Number of data items to transfer
+    dma_set_number_of_data(DMA1, DMA_CHANNEL5, CAPTURE_BUFFER_SIZE);
+
+    // Configure transfer: 
+    // From peripheral to memory, 16-bit transfers,
+    // increment memory address, do not increment peripheral,
+    // circular mode, enable transfer complete interrupt if needed.
+    dma_set_read_from_peripheral(DMA1, DMA_CHANNEL5);
+    dma_enable_memory_increment_mode(DMA1, DMA_CHANNEL5);
+    dma_set_peripheral_size(DMA1, DMA_CHANNEL5, DMA_CCR_PSIZE_16BIT);
+    dma_set_memory_size(DMA1, DMA_CHANNEL5, DMA_CCR_MSIZE_16BIT);
+    dma_enable_circular_mode(DMA1, DMA_CHANNEL5);
+
+    // Priority level can be set if needed
+    dma_set_priority(DMA1, DMA_CHANNEL5, DMA_CCR_PL_LOW);
+
+    // Enable the DMA channel
+    dma_enable_channel(DMA1, DMA_CHANNEL5);
+
+    // The timer must be configured to generate DMA requests for CC1 event (already done with TIM_DIER_CC1DE)
+}
+
 extern "C" void dma1_channel2_isr(void) {  // RX complete
     if (dma_get_interrupt_flag(DMA1, DMA_CHANNEL2, DMA_TCIF)) {
         dma_clear_interrupt_flags(DMA1, DMA_CHANNEL2, DMA_TCIF);
@@ -229,7 +293,7 @@ extern "C" void dma1_channel3_isr(void) {  // TX complete
 }
 
 // #define DIRO GPIO12
-// #define TACHO GPIO15
+#define TACHO GPIO15
 #define BRAKE GPIO14
 #define DIR GPIO13
 
@@ -252,6 +316,17 @@ int main(void) {
     pwm_setup();
     dma_setup();
     spi_slave_setup();
+
+    // A0
+    gpio_set_mode(GPIOA, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, GPIO0);
+
+    //timer_capture_setup();
+    //timer_dma_setup();
+    // start capture_buffer at 0
+    for (int i = 0; i < CAPTURE_BUFFER_SIZE; i++) {
+        capture_buffer[i] = 0;
+    }
+
     for (int i = 0; i < BUFFER_SIZE; i++) {
         rx_buffer[i] = 0.0;
         tx_buffer[i] = 0.0;
@@ -262,13 +337,13 @@ int main(void) {
     set_gpio(DIR, 0);
     set_gpio(BRAKE, 1);
 
-    set_pwm(1, 75);
+    set_pwm(1, 50);
 
     // int vals[] = {0, 200, 400, 600};
     // int j = 1;
     while (1) {
         gpio_toggle(GPIOC, GPIO13);
-        delay(10);
+        delay(200);
         // timer_set_oc_value(TIM1, TIM_OC1, 100);
         // for (int i = 0; i < 4; i++) {
         //     vals[i] += 100;
