@@ -3,6 +3,7 @@
 #include <libopencm3/stm32/gpio.h>
 #include <libopencm3/stm32/spi.h>
 #include <libopencm3/cm3/systick.h>
+#include <libopencm3/cm3/cortex.h>
 #include <libopencm3/stm32/timer.h>
 #include <libopencm3/cm3/nvic.h>
 #include <libopencm3/stm32/dma.h>
@@ -243,6 +244,60 @@ void set_gpio(int pin, int state) {
     }
 }
 
+volatile uint32_t filtered_period = 0; // Filtered period value
+const float alpha = 0.8; // Low-pass filter coefficient
+
+void capture_timer_setup(void) {
+    gpio_set_mode(GPIOA, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, GPIO6);
+    // Enable clocks for TIM2 and TIM3
+    rcc_periph_clock_enable(RCC_TIM2);
+    rcc_periph_clock_enable(RCC_TIM3);
+
+    // TIM2 configuration (Master Timer)
+    timer_set_prescaler(TIM2, 71); // Timer clock = 72 MHz / (71 + 1) = 1 MHz (1 us resolution)
+    timer_set_period(TIM2, 0xFFFF); // Auto-reload value for TIM2
+    timer_set_master_mode(TIM2, TIM_CR2_MMS_UPDATE); // Update event as trigger output
+    timer_enable_counter(TIM2);
+
+    // TIM3 configuration (Slave Timer)
+    timer_set_prescaler(TIM3, 0); // No prescaler for TIM3
+    timer_set_period(TIM3, 0xFFFF); // Auto-reload value for TIM3
+    timer_slave_set_trigger(TIM3, TIM_SMCR_TS_ITR1); // Use TIM2 as trigger input
+    timer_slave_set_mode(TIM3, TIM_SMCR_SMS_ECM1); // External clock mode 1 (slave mode)
+
+    timer_ic_set_input(TIM3, TIM_IC1, TIM_IC_IN_TI1); // Map TIM3_CH1 to TI1 (PA6)
+    timer_ic_set_filter(TIM3, TIM_IC1, TIM_IC_OFF);
+    timer_ic_set_polarity(TIM3, TIM_IC1, TIM_IC_RISING); // Capture on rising edge
+    timer_ic_enable(TIM3, TIM_IC1); // Enable input capture
+
+    timer_enable_counter(TIM3);
+
+    // Enable TIM3 interrupt
+    nvic_enable_irq(NVIC_TIM3_IRQ);
+    timer_enable_irq(TIM3, TIM_DIER_CC1IE); // Enable capture/compare interrupt
+}
+
+void tim3_isr(void) {
+    static uint32_t last_capture = 0;
+    uint32_t current_capture;
+    uint32_t period;
+
+    if (timer_get_flag(TIM3, TIM_SR_CC1IF)) {
+        // Clear interrupt flag
+        timer_clear_flag(TIM3, TIM_SR_CC1IF);
+
+        // Read the captured value
+        current_capture = TIM3_CCR1;
+
+        // Calculate the period (overflow automatically handled by 32-bit timer)
+        period = current_capture - last_capture;
+        last_capture = current_capture;
+
+        // Apply low-pass filter
+        filtered_period = (uint32_t)((alpha * period) + ((1.0 - alpha) * filtered_period));
+    }
+}
+
 
 int main(void) {
     rcc_clock_setup_pll(&rcc_hse_configs[RCC_CLOCK_HSE8_72MHZ]);
@@ -258,6 +313,8 @@ int main(void) {
     }
 
     rcc_periph_clock_enable(RCC_GPIOB);
+
+    capture_timer_setup();
     
     set_gpio(DIR, 0);
     set_gpio(BRAKE, 1);
@@ -268,7 +325,7 @@ int main(void) {
     // int j = 1;
     while (1) {
         gpio_toggle(GPIOC, GPIO13);
-        delay(10);
+        delay(200);
         // timer_set_oc_value(TIM1, TIM_OC1, 100);
         // for (int i = 0; i < 4; i++) {
         //     vals[i] += 100;
