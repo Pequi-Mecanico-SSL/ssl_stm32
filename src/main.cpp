@@ -6,6 +6,7 @@
 #include <libopencm3/stm32/timer.h>
 #include <libopencm3/cm3/nvic.h>
 #include <libopencm3/stm32/dma.h>
+#include <libopencm3/stm32/exti.h>
 
 static volatile uint64_t _millis = 0;
 
@@ -32,8 +33,11 @@ static void gpio_setup(void) {
                   GPIO_CNF_OUTPUT_PUSHPULL, GPIO13);
 }
 
-int pwm_timer_period = 1000; // Period = 1000, for 1 kHz PWM frequency
+int pwm_timer_period = 400; // Period = 1000, for 1 kHz PWM frequency
 void set_pwm(int channel, float duty_cycle) {
+    if (duty_cycle < 0 || duty_cycle > 100) {
+        return;
+    }
     int value = int(duty_cycle * (pwm_timer_period/100.0));
     switch (channel) {
         case 1:
@@ -228,8 +232,8 @@ extern "C" void dma1_channel3_isr(void) {  // TX complete
     }
 }
 
-// #define DIRO GPIO12
-// #define TACHO GPIO15
+#define DIRO GPIO12
+#define TACHO GPIO15
 #define BRAKE GPIO14
 #define DIR GPIO13
 
@@ -243,6 +247,69 @@ void set_gpio(int pin, int state) {
     }
 }
 
+volatile uint32_t b15_counter = 0;
+
+float period = 0;
+uint64_t prev_measure = 0;
+float alpha = 0.9;
+
+void write_val(float val) {
+    tx_buffer[0] = val; 
+    spi_write(SPI1, tx_buffer[0]);
+}
+
+// EXTI interrupt handler for B12 and B15
+extern "C" void exti15_10_isr(void) {
+    //if (exti_get_flag_status(EXTI12)) {
+    //    direction = gpio_get(GPIOB, DIRO) ? 1 : -1;
+    //    period = 0;
+    //    prev_measure = _millis;
+    //    write_val(period);
+    //    exti_reset_request(EXTI12); // Clear the interrupt flag
+    //}
+
+    if (exti_get_flag_status(EXTI15)) {
+        uint64_t now = _millis;
+        float measured_period = (now - prev_measure);
+        int direction = gpio_get(GPIOB, DIRO) ? 1 : -1;
+        period = alpha * direction * measured_period + (1 - alpha) * period;
+        prev_measure = now;
+        b15_counter++; // Increment counter for B15
+        write_val(period);
+        exti_reset_request(EXTI15); // Clear the interrupt flag
+    }
+}
+
+void tacho_diro_interrupt_setup() {
+        // Enable clock for GPIOB and AFIO
+    rcc_periph_clock_enable(RCC_GPIOB);
+    rcc_periph_clock_enable(RCC_AFIO);
+
+    // Configure B12 and B15 as pull down inputs
+    //gpio_set_mode(GPIOB, GPIO_MODE_INPUT, GPIO_CNF_INPUT_PULL_UPDOWN, TACHO | DIRO);
+    //gpio_set(GPIOB, DIRO);
+    //gpio_clear(GPIOB, TACHO);
+    // float
+    gpio_set_mode(GPIOB, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, TACHO | DIRO);
+
+
+
+    // Enable interrupts for EXTI12 and EXTI15
+    //exti_select_source(EXTI12, GPIOB);
+    exti_select_source(EXTI15, GPIOB);
+
+    // Configure EXTI for both edges (rising and falling)
+    //exti_set_trigger(EXTI12, EXTI_TRIGGER_BOTH);
+    exti_set_trigger(EXTI15, EXTI_TRIGGER_BOTH);
+
+    // Enable EXTI interrupt lines
+    //exti_enable_request(EXTI12);
+    exti_enable_request(EXTI15);
+
+    // Enable EXTI interrupt in NVIC
+    nvic_enable_irq(NVIC_EXTI15_10_IRQ);
+}
+
 
 int main(void) {
     rcc_clock_setup_pll(&rcc_hse_configs[RCC_CLOCK_HSE8_72MHZ]);
@@ -252,6 +319,7 @@ int main(void) {
     pwm_setup();
     dma_setup();
     spi_slave_setup();
+    tacho_diro_interrupt_setup();
     for (int i = 0; i < BUFFER_SIZE; i++) {
         rx_buffer[i] = 0.0;
         tx_buffer[i] = 0.0;
@@ -262,13 +330,14 @@ int main(void) {
     set_gpio(DIR, 0);
     set_gpio(BRAKE, 1);
 
-    set_pwm(1, 75);
+    set_pwm(1, 15);
 
     // int vals[] = {0, 200, 400, 600};
     // int j = 1;
     while (1) {
         gpio_toggle(GPIOC, GPIO13);
-        delay(10);
+        //gpio_toggle(GPIOB, BRAKE);
+        delay(200);
         // timer_set_oc_value(TIM1, TIM_OC1, 100);
         // for (int i = 0; i < 4; i++) {
         //     vals[i] += 100;
@@ -310,10 +379,10 @@ int main(void) {
             for (int i = 0; i < BUFFER_SIZE; i++) {
                 set_pwm(i + 1, rx_buffer[i]);
             }
-            for (int i = 0; i < BUFFER_SIZE; i++) {
-                tx_buffer[i] = rx_buffer[i];
-            }
-            spi_write(SPI1, tx_buffer[0]);
+            //for (int i = 0; i < BUFFER_SIZE; i++) {
+            //   tx_buffer[i] = rx_buffer[i];
+            //}
+            //spi_write(SPI1, tx_buffer[0]);
         }
         //for (int i = 0; i < BUFFER_SIZE; i++) {
         //    tx_buffer[i] = j + i;
