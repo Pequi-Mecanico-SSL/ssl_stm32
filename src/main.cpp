@@ -33,7 +33,7 @@ static void gpio_setup(void) {
                   GPIO_CNF_OUTPUT_PUSHPULL, GPIO13);
 }
 
-int pwm_timer_period = 400; // Period = 1000, for 1 kHz PWM frequency
+int pwm_timer_period = 1000; // Period = 1000, for 1 kHz PWM frequency
 void set_pwm(int channel, float duty_cycle) {
     if (duty_cycle < 0 || duty_cycle > 100) {
         return;
@@ -247,8 +247,6 @@ void set_gpio(int pin, int state) {
     }
 }
 
-volatile uint32_t b15_counter = 0;
-
 float period = 0;
 uint64_t prev_measure = 0;
 float alpha = 0.9;
@@ -258,56 +256,52 @@ void write_val(float val) {
     spi_write(SPI1, tx_buffer[0]);
 }
 
-// EXTI interrupt handler for B12 and B15
-extern "C" void exti15_10_isr(void) {
-    //if (exti_get_flag_status(EXTI12)) {
-    //    direction = gpio_get(GPIOB, DIRO) ? 1 : -1;
-    //    period = 0;
-    //    prev_measure = _millis;
-    //    write_val(period);
-    //    exti_reset_request(EXTI12); // Clear the interrupt flag
-    //}
+static uint32_t read_32bit_time(void) {
+    uint16_t high = timer_get_counter(TIM3);
+    uint16_t low  = timer_get_counter(TIM2);
+    return ((uint32_t)high << 16) | (uint32_t)low;
+}
 
+// EXTI interrupt handler for tacho B15
+extern "C" void exti15_10_isr(void) {
     if (exti_get_flag_status(EXTI15)) {
-        uint64_t now = _millis;
+        volatile uint64_t now = read_32bit_time();
         float measured_period = (now - prev_measure);
-        int direction = gpio_get(GPIOB, DIRO) ? 1 : -1;
-        period = alpha * direction * measured_period + (1 - alpha) * period;
         prev_measure = now;
-        b15_counter++; // Increment counter for B15
-        write_val(period);
+        if (measured_period >= 0) {
+            int direction = gpio_get(GPIOB, DIRO) ? 1 : -1;
+            period = alpha * direction * measured_period + (1 - alpha) * period;
+            write_val(period);
+        }
         exti_reset_request(EXTI15); // Clear the interrupt flag
     }
 }
 
-void tacho_diro_interrupt_setup() {
-        // Enable clock for GPIOB and AFIO
+void setup_tacho_diro_timers_and_interrupts() {
     rcc_periph_clock_enable(RCC_GPIOB);
+    rcc_periph_clock_enable(RCC_TIM2);
+    rcc_periph_clock_enable(RCC_TIM3);
     rcc_periph_clock_enable(RCC_AFIO);
 
-    // Configure B12 and B15 as pull down inputs
-    //gpio_set_mode(GPIOB, GPIO_MODE_INPUT, GPIO_CNF_INPUT_PULL_UPDOWN, TACHO | DIRO);
-    //gpio_set(GPIOB, DIRO);
-    //gpio_clear(GPIOB, TACHO);
-    // float
     gpio_set_mode(GPIOB, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, TACHO | DIRO);
 
-
-
-    // Enable interrupts for EXTI12 and EXTI15
-    //exti_select_source(EXTI12, GPIOB);
     exti_select_source(EXTI15, GPIOB);
-
-    // Configure EXTI for both edges (rising and falling)
-    //exti_set_trigger(EXTI12, EXTI_TRIGGER_BOTH);
     exti_set_trigger(EXTI15, EXTI_TRIGGER_BOTH);
-
-    // Enable EXTI interrupt lines
-    //exti_enable_request(EXTI12);
     exti_enable_request(EXTI15);
-
-    // Enable EXTI interrupt in NVIC
     nvic_enable_irq(NVIC_EXTI15_10_IRQ);
+
+    timer_set_prescaler(TIM2, 72 - 1);
+    timer_set_period(TIM2, 0xFFFF);
+    timer_set_master_mode(TIM2, TIM_CR2_MMS_UPDATE);
+
+
+    timer_set_prescaler(TIM3, 0);
+    timer_set_period(TIM3, 0xFFFF);
+    timer_slave_set_trigger(TIM3, TIM_SMCR_TS_ITR1);
+    timer_slave_set_mode(TIM3, TIM_SMCR_SMS_ECM1);
+
+    timer_enable_counter(TIM3);
+    timer_enable_counter(TIM2);
 }
 
 
@@ -319,7 +313,8 @@ int main(void) {
     pwm_setup();
     dma_setup();
     spi_slave_setup();
-    tacho_diro_interrupt_setup();
+    // tacho_diro_interrupt_setup();
+    setup_tacho_diro_timers_and_interrupts();
     for (int i = 0; i < BUFFER_SIZE; i++) {
         rx_buffer[i] = 0.0;
         tx_buffer[i] = 0.0;
@@ -330,7 +325,7 @@ int main(void) {
     set_gpio(DIR, 0);
     set_gpio(BRAKE, 1);
 
-    set_pwm(1, 15);
+    set_pwm(1, 0);
 
     // int vals[] = {0, 200, 400, 600};
     // int j = 1;
