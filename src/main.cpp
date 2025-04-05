@@ -1,4 +1,6 @@
 #include <errno.h>
+#include <stdio.h>
+#include <stdint.h>
 #include <libopencm3/stm32/rcc.h>
 #include <libopencm3/stm32/gpio.h>
 #include <libopencm3/stm32/spi.h>
@@ -7,6 +9,9 @@
 #include <libopencm3/cm3/nvic.h>
 #include <libopencm3/stm32/dma.h>
 #include <libopencm3/stm32/exti.h>
+#include <libopencm3/stm32/usart.h>
+#include <string>
+#include <cmath>
 
 static volatile uint64_t _millis = 0;
 
@@ -33,12 +38,13 @@ static void gpio_setup(void) {
                   GPIO_CNF_OUTPUT_PUSHPULL, GPIO13);
 }
 
-int pwm_timer_period = 1000; // Period = 1000, for 1 kHz PWM frequency
+int pwm_timer_period = 1028; // for 70khz
+//int pwm_timer_period = 400; // Period = 1000, for 1 kHz PWM frequency
 void set_pwm(int channel, float duty_cycle) {
     if (duty_cycle < 0 || duty_cycle > 100) {
         return;
     }
-    int value = int(duty_cycle * (pwm_timer_period/100.0));
+    int value = int((duty_cycle/100.0) * pwm_timer_period);
     switch (channel) {
         case 1:
             timer_set_oc_value(TIM1, TIM_OC1, value);
@@ -67,7 +73,7 @@ void pwm_setup(void) {
     gpio_set_mode(GPIOA, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, GPIO8 | GPIO9 | GPIO10 | GPIO11);
 
     // 3. Set up Timer1 for PWM mode
-    timer_set_prescaler(TIM1, 72 - 1);  // Prescaler = 72, for 1 MHz timer frequency
+    timer_set_prescaler(TIM1, 0);  // 72 MHz frequency
     timer_set_period(TIM1, pwm_timer_period-1);
 
     // Set the PWM mode to mode 1 (active when counter < CCRx) for each channel
@@ -249,7 +255,7 @@ void set_gpio(int pin, int state) {
 
 float period = 0;
 uint64_t prev_measure = 0;
-float alpha = 0.9;
+float alpha = 0.95;
 
 void write_val(float val) {
     tx_buffer[0] = val; 
@@ -269,8 +275,8 @@ extern "C" void exti15_10_isr(void) {
         float measured_period = (now - prev_measure);
         prev_measure = now;
         if (measured_period >= 0) {
-            int direction = gpio_get(GPIOB, DIRO) ? 1 : -1;
-            period = alpha * direction * measured_period + (1 - alpha) * period;
+            //int direction = gpio_get(GPIOB, DIRO) ? 1 : -1;
+            period = alpha * 1 * measured_period + (1 - alpha) * period;
             write_val(period);
         }
         exti_reset_request(EXTI15); // Clear the interrupt flag
@@ -304,6 +310,64 @@ void setup_tacho_diro_timers_and_interrupts() {
     timer_enable_counter(TIM2);
 }
 
+static void usart_setup(void) {
+    /* Enable clocks for GPIOA and USART1 */
+    rcc_periph_clock_enable(RCC_GPIOB);
+    rcc_periph_clock_enable(RCC_USART3);
+
+    /* 
+     * Set up GPIOA pin9 (USART1 TX) as alternate function push-pull.
+     * Set up GPIOA pin10 (USART1 RX) as input floating (or pull-up).
+     */
+    gpio_set_mode(GPIOB,
+                  GPIO_MODE_OUTPUT_50_MHZ,
+                  GPIO_CNF_OUTPUT_ALTFN_PUSHPULL,
+                  GPIO10);
+    gpio_set_mode(GPIOB,
+                  GPIO_MODE_INPUT,
+                  GPIO_CNF_INPUT_FLOAT,
+                  GPIO11);
+
+    /* 
+     * Configure USART1:
+     *  - Baud rate: 115200
+     *  - 8 data bits, no parity, 1 stop bit
+     *  - Enable transmitter and receiver
+     */
+    usart_set_baudrate(USART3, 115200);
+    usart_set_databits(USART3, 8);
+    usart_set_stopbits(USART3, USART_STOPBITS_1);
+    usart_set_mode(USART3, USART_MODE_TX_RX);
+    usart_set_parity(USART3, USART_PARITY_NONE);
+    usart_set_flow_control(USART3, USART_FLOWCONTROL_NONE);
+
+    /* Finally, enable the USART. */
+    usart_enable(USART3);
+}
+
+static void send_uint32_decimal(uint32_t val) {
+    /* Convert number to decimal string. */
+    char buffer[32];
+    int len = snprintf(buffer, sizeof(buffer), "%lu\r\n", (unsigned long)val);
+
+    /* Transmit each character. */
+    for (int i = 0; i < len; i++) {
+        usart_send_blocking(USART3, buffer[i]);
+    }
+}
+
+static void send(std::string msg) {
+    for (int i = 0; i < msg.length(); i++) {
+        usart_send_blocking(USART3, msg[i]);
+    }
+}
+
+static void send(char *msg) {
+    for (int i = 0; msg[i] != '\0'; i++) {
+        usart_send_blocking(USART3, msg[i]);
+    }
+}
+
 
 int main(void) {
     rcc_clock_setup_pll(&rcc_hse_configs[RCC_CLOCK_HSE8_72MHZ]);
@@ -313,6 +377,7 @@ int main(void) {
     pwm_setup();
     dma_setup();
     spi_slave_setup();
+    usart_setup();
     // tacho_diro_interrupt_setup();
     setup_tacho_diro_timers_and_interrupts();
     for (int i = 0; i < BUFFER_SIZE; i++) {
@@ -325,14 +390,20 @@ int main(void) {
     set_gpio(DIR, 0);
     set_gpio(BRAKE, 1);
 
-    set_pwm(1, 0);
+    set_pwm(1, 47);
 
     // int vals[] = {0, 200, 400, 600};
     // int j = 1;
+    float amplitude = 20;
+    float offset = 47;
+    float freq = 0.05;
     while (1) {
         gpio_toggle(GPIOC, GPIO13);
         //gpio_toggle(GPIOB, BRAKE);
-        delay(200);
+        delay(100);
+
+        float pwm_signal = offset + amplitude * std::sin(2 * 3.14159 * freq * _millis / 1000.0);
+        set_pwm(1, pwm_signal);
         // timer_set_oc_value(TIM1, TIM_OC1, 100);
         // for (int i = 0; i < 4; i++) {
         //     vals[i] += 100;
@@ -364,21 +435,25 @@ int main(void) {
         //     gpio_clear(GPIOC, GPIO13);
         // }
 
+        char buffer[200];
+        snprintf(buffer, sizeof(buffer), "Period: %d\n", int(period));
+        send(buffer);
+
         // only write if the ss is high
-        if (gpio_get(GPIOA, GPIO4)) {
-            static_assert(BUFFER_SIZE == 4);
+        //if (gpio_get(GPIOA, GPIO4)) {
+        //    static_assert(BUFFER_SIZE == 4);
             //set_pwm(1, int(rx_buffer[0]));
             //set_pwm(2, int(rx_buffer[1]));
             //set_pwm(3, int(rx_buffer[2]));
             //set_pwm(4, int(rx_buffer[3]));
-            for (int i = 0; i < BUFFER_SIZE; i++) {
-                set_pwm(i + 1, rx_buffer[i]);
-            }
+        //    for (int i = 0; i < BUFFER_SIZE; i++) {
+        //        set_pwm(i + 1, rx_buffer[i]);
+        //    }
             //for (int i = 0; i < BUFFER_SIZE; i++) {
             //   tx_buffer[i] = rx_buffer[i];
             //}
             //spi_write(SPI1, tx_buffer[0]);
-        }
+        //}
         //for (int i = 0; i < BUFFER_SIZE; i++) {
         //    tx_buffer[i] = j + i;
         //}
