@@ -390,20 +390,20 @@ int main(void) {
     set_gpio(DIR, 0);
     set_gpio(BRAKE, 1);
 
-    set_pwm(1, 47);
+    // set_pwm(1, 47);
 
     // int vals[] = {0, 200, 400, 600};
     // int j = 1;
-    float amplitude = 20;
-    float offset = 47;
-    float freq = 0.05;
+    // float amplitude = 20;
+    // float offset = 47;
+    // float freq = 0.05;
     while (1) {
         gpio_toggle(GPIOC, GPIO13);
         //gpio_toggle(GPIOB, BRAKE);
-        delay(100);
+        delay(50);
 
-        float pwm_signal = offset + amplitude * std::sin(2 * 3.14159 * freq * _millis / 1000.0);
-        set_pwm(1, pwm_signal);
+        // float pwm_signal = offset + amplitude * std::sin(2 * 3.14159 * freq * _millis / 1000.0);
+        // set_pwm(1, pwm_signal);
         // timer_set_oc_value(TIM1, TIM_OC1, 100);
         // for (int i = 0; i < 4; i++) {
         //     vals[i] += 100;
@@ -435,25 +435,25 @@ int main(void) {
         //     gpio_clear(GPIOC, GPIO13);
         // }
 
-        char buffer[200];
-        snprintf(buffer, sizeof(buffer), "Period: %d\n", int(period));
-        send(buffer);
+        // char buffer[200];
+        // snprintf(buffer, sizeof(buffer), "Period: %d\n", int(period));
+        // send(buffer);
 
         // only write if the ss is high
-        //if (gpio_get(GPIOA, GPIO4)) {
-        //    static_assert(BUFFER_SIZE == 4);
-            //set_pwm(1, int(rx_buffer[0]));
-            //set_pwm(2, int(rx_buffer[1]));
-            //set_pwm(3, int(rx_buffer[2]));
-            //set_pwm(4, int(rx_buffer[3]));
-        //    for (int i = 0; i < BUFFER_SIZE; i++) {
-        //        set_pwm(i + 1, rx_buffer[i]);
-        //    }
-            //for (int i = 0; i < BUFFER_SIZE; i++) {
+        if (gpio_get(GPIOA, GPIO4)) {
+           static_assert(BUFFER_SIZE == 4);
+            set_pwm(1, int(rx_buffer[0]));
+            set_pwm(2, int(rx_buffer[1]));
+            set_pwm(3, int(rx_buffer[2]));
+            set_pwm(4, int(rx_buffer[3]));
+            for (int i = 0; i < BUFFER_SIZE; i++) {
+                set_pwm(i + 1, rx_buffer[i]);
+            }
+            // for (int i = 0; i < BUFFER_SIZE; i++) {
             //   tx_buffer[i] = rx_buffer[i];
-            //}
-            //spi_write(SPI1, tx_buffer[0]);
-        //}
+            // }
+            spi_write(SPI1, tx_buffer[0]);
+        }
         //for (int i = 0; i < BUFFER_SIZE; i++) {
         //    tx_buffer[i] = j + i;
         //}
