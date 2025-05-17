@@ -82,22 +82,22 @@ void pwm_setup(void) {
     timer_set_oc_mode(TIM1, TIM_OC1, TIM_OCM_PWM1);
     timer_enable_oc_output(TIM1, TIM_OC1);  // Enable output compare on channel 1
     // timer_set_oc_value(TIM1, TIM_OC1, int(0 * (freq/100.0)));  // duty cycle
-    set_pwm(1, 47);
+    set_pwm(1, 50);
 
     // Channel 2 on PA9
     timer_set_oc_mode(TIM1, TIM_OC2, TIM_OCM_PWM1);
     timer_enable_oc_output(TIM1, TIM_OC2);  // Enable output compare on channel 2
-    set_pwm(2, 47);  // duty cycle
+    set_pwm(2, 50);  // duty cycle
 
     // Channel 3 on PA10
     timer_set_oc_mode(TIM1, TIM_OC3, TIM_OCM_PWM1);
     timer_enable_oc_output(TIM1, TIM_OC3);  // Enable output compare on channel 3
-    set_pwm(3, 47);  // duty cycle
+    set_pwm(3, 50);  // duty cycle
 
     // Channel 4 on PA11
     timer_set_oc_mode(TIM1, TIM_OC4, TIM_OCM_PWM1);
     timer_enable_oc_output(TIM1, TIM_OC4);  // Enable output compare on channel 4
-    set_pwm(4, 47);  // duty cycle
+    set_pwm(4, 50);  // duty cycle
 
     // Enable Timer1 counter and output
     timer_enable_preload(TIM1);
@@ -217,6 +217,7 @@ extern "C" void dma1_channel2_isr(void) {  // RX complete
         dma_set_memory_address(DMA1, DMA_CHANNEL2, (uint32_t)rx_buffer);
         dma_set_number_of_data(DMA1, DMA_CHANNEL2, sizeof(rx_buffer));
         dma_enable_channel(DMA1, DMA_CHANNEL2);
+        
         // dma_clear_interrupt_flags(DMA1, DMA_CHANNEL2, DMA_TCIF);
     }
 }
@@ -241,16 +242,15 @@ extern "C" void dma1_channel3_isr(void) {  // TX complete
 
 #define DIRO GPIO12
 // #define TACHO GPIO15
-#define BRAKE GPIO14
 #define DIR GPIO13
 
-void set_gpio(int pin, int state) {
-    gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_2_MHZ,
+void set_gpio(int pin, int port, int state) {
+    gpio_set_mode(port, GPIO_MODE_OUTPUT_2_MHZ,
                   GPIO_CNF_OUTPUT_PUSHPULL, pin);
     if (state) {
-        gpio_set(GPIOB, pin);
+        gpio_set(port, pin);
     } else {
-        gpio_clear(GPIOB, pin);
+        gpio_clear(port, pin);
     }
 }
 
@@ -277,7 +277,7 @@ void update_period(int index) {
     }
 }
 
-// EXTI interrupt handler for tacho B15
+// EXTI interrupt handler for tacho
 extern "C" void exti15_10_isr(void) {
     if (exti_get_flag_status(EXTI15)) {
         update_period(0);
@@ -286,26 +286,26 @@ extern "C" void exti15_10_isr(void) {
     spi_write(SPI1, tx_buffer[0]);
 }
 
+extern "C" void exti4_isr(void) {
+    if (exti_get_flag_status(EXTI4)) {
+        update_period(1);
+        exti_reset_request(EXTI4); // Clear the interrupt flag
+    }
+    spi_write(SPI1, tx_buffer[0]);
+}
+
+extern "C" void exti9_5_isr(void) {
+    if (exti_get_flag_status(EXTI6)) {
+        update_period(2);
+        exti_reset_request(EXTI6); // Clear the interrupt flag
+    }
+    spi_write(SPI1, tx_buffer[0]);
+}
+
 extern "C" void exti1_isr(void) {
     if (exti_get_flag_status(EXTI1)) {
-        update_period(1);
-        exti_reset_request(EXTI1); // Clear the interrupt flag
-    }
-    spi_write(SPI1, tx_buffer[0]);
-}
-
-extern "C" void exti2_isr(void) {
-    if (exti_get_flag_status(EXTI2)) {
-        update_period(2);
-        exti_reset_request(EXTI2); // Clear the interrupt flag
-    }
-    spi_write(SPI1, tx_buffer[0]);
-}
-
-extern "C" void exti3_isr(void) {
-    if (exti_get_flag_status(EXTI3)) {
         update_period(3);
-        exti_reset_request(EXTI3); // Clear the interrupt flag
+        exti_reset_request(EXTI1); // Clear the interrupt flag
     }
     spi_write(SPI1, tx_buffer[0]);
 }
@@ -333,10 +333,10 @@ void setup_tacho_diro_timers_and_interrupts() {
     // exti_enable_request(EXTI15);
     // nvic_enable_irq(NVIC_EXTI15_10_IRQ);
 
-    setup_interrupt(GPIOB, GPIO15, EXTI15, NVIC_EXTI15_10_IRQ);
-    setup_interrupt(GPIOA, GPIO1, EXTI1, NVIC_EXTI1_IRQ);
-    setup_interrupt(GPIOA, GPIO2, EXTI2, NVIC_EXTI2_IRQ);
-    setup_interrupt(GPIOA, GPIO3, EXTI3, NVIC_EXTI3_IRQ);
+    //setup_interrupt(GPIOB, GPIO15, EXTI15, NVIC_EXTI15_10_IRQ);
+    setup_interrupt(GPIOB, GPIO4, EXTI4, NVIC_EXTI4_IRQ);
+    //setup_interrupt(GPIOB, GPIO6, EXTI6, NVIC_EXTI9_5_IRQ);
+    //setup_interrupt(GPIOA, GPIO1, EXTI1, NVIC_EXTI1_IRQ);
     
     timer_set_prescaler(TIM2, 72 - 1);
     timer_set_period(TIM2, 0xFFFF);
@@ -421,6 +421,8 @@ int main(void) {
     spi_slave_setup();
     usart_setup();
     // tacho_diro_interrupt_setup();
+    rcc_periph_clock_enable(RCC_GPIOA);
+    rcc_periph_clock_enable(RCC_GPIOB);
     setup_tacho_diro_timers_and_interrupts();
     for (int i = 0; i < BUFFER_SIZE; i++) {
         rx_buffer[i] = 0.0;
@@ -429,13 +431,20 @@ int main(void) {
 
     rcc_periph_clock_enable(RCC_GPIOB);
     
-    set_gpio(DIR, 0);
-    set_gpio(BRAKE, 1);
+    //set_gpio(DIR, 0);
+    set_gpio(GPIO14, GPIOB, 1);
+    set_gpio(GPIO3, GPIOB, 1);
+    set_gpio(GPIO7, GPIOB, 1);
+    set_gpio(GPIO2, GPIOA, 1);
 
-    set_pwm(1, 47);
-    set_pwm(2, 47);
-    set_pwm(3, 47);
-    set_pwm(4, 47);
+    set_pwm(1, 50);
+    set_pwm(2, 50);
+    set_pwm(3, 50);
+    set_pwm(4, 50);
+    rx_buffer[0] = 50;
+    rx_buffer[1] = 50;
+    rx_buffer[2] = 50;
+    rx_buffer[3] = 50;
 
     // int vals[] = {0, 200, 400, 600};
     // int j = 1;
