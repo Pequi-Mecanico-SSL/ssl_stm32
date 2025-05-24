@@ -256,7 +256,6 @@ void set_gpio(int pin, int port, int state) {
 
 // float period = 0;
 // uint64_t prev_measure = 0;
-std::array<uint64_t, 4> prev_measures = {0, 0, 0, 0};
 std::array<float, 4> periods = {0, 0, 0, 0};
 float alpha = 0.95;
 
@@ -266,11 +265,50 @@ static uint32_t read_32bit_time(void) {
     return ((uint32_t)high << 16) | (uint32_t)low;
 }
 
+template <size_t N>
+struct FilterQueue {
+    uint64_t buffer[N];
+    size_t size = 0;
+    bool filter() {
+        if (size < 2) {
+            return true;
+        } else if (buffer[size - 1] - buffer[size - 2] < 10) {
+            size -= 2;
+            return false;
+        } else {
+            return true;
+        }
+    }
+    public:
+    void push(uint64_t value) {
+        if (size >= N) {
+            size = 0;  // Reset the buffer if it exceeds the size
+        }
+        buffer[size] = value;
+        size++;
+    }
+    bool pop_and_measure(uint64_t &period) {
+        if (size < 3) {
+            return false;
+        }
+        period = buffer[size - 2] - buffer[size - 3];
+        buffer[size - 3] = buffer[size - 1];
+        size -= 2;
+        return true;
+    }
+    void repeated_filter() {
+        while (!filter());
+    }
+};
+
+FilterQueue<20> filter_queue[4];
+
 void update_period(int index) {
     volatile uint64_t now = read_32bit_time();
-    float measured_period = (now - prev_measures[index]);
-    prev_measures[index] = now;
-    if (measured_period >= 0) {
+    filter_queue[index].push(now);
+    filter_queue[index].repeated_filter();
+    uint64_t measured_period = 0;
+    if (filter_queue[index].pop_and_measure(measured_period)) {
         //int direction = gpio_get(GPIOB, DIRO) ? 1 : -1;
         periods[index] = alpha * measured_period + (1 - alpha) * periods[index];
         tx_buffer[index] = periods[index];
