@@ -160,8 +160,8 @@ void spi_slave_setup(void) {
 
 
 #define BUFFER_SIZE 4  // Define the number of bytes to transfer
-float tx_buffer[BUFFER_SIZE];  // Buffer to hold data to send
-float rx_buffer[BUFFER_SIZE];  // Buffer to hold received data
+volatile float tx_buffer[BUFFER_SIZE];  // Buffer to hold data to send
+volatile float rx_buffer[BUFFER_SIZE];  // Buffer to hold received data
 // volatile uint32_t velocity_cmd[4];  // Buffer to hold data to send
 // volatile uint32_t current_velocity[4];  // Buffer to hold received data
 
@@ -254,138 +254,120 @@ void set_gpio(int pin, int port, int state) {
     }
 }
 
-// float period = 0;
-// uint64_t prev_measure = 0;
-std::array<float, 4> periods = {0, 0, 0, 0};
+volatile uint32_t prev_measures[4] = {0, 0, 0, 0};
+volatile float periods[4] = {0, 0, 0, 0};
 float alpha = 0.95;
 
-static uint32_t read_32bit_time(void) {
-    uint16_t high = timer_get_counter(TIM3);
-    uint16_t low  = timer_get_counter(TIM2);
-    return ((uint32_t)high << 16) | (uint32_t)low;
-}
-
-template <size_t N>
-struct FilterQueue {
-    uint64_t buffer[N];
-    size_t size = 0;
-    bool filter() {
-        if (size < 2) {
-            return true;
-        } else if (buffer[size - 1] - buffer[size - 2] < 10) {
-            size -= 2;
-            return false;
-        } else {
-            return true;
-        }
-    }
-    public:
-    void push(uint64_t value) {
-        if (size >= N) {
-            size = 0;  // Reset the buffer if it exceeds the size
-        }
-        buffer[size] = value;
-        size++;
-    }
-    bool pop_and_measure(uint64_t &period) {
-        if (size < 3) {
-            return false;
-        }
-        period = buffer[size - 2] - buffer[size - 3];
-        buffer[size - 3] = buffer[size - 1];
-        size -= 2;
-        return true;
-    }
-    void repeated_filter() {
-        while (!filter());
-    }
-};
-
-FilterQueue<20> filter_queue[4];
-
-void update_period(int index) {
-    volatile uint64_t now = read_32bit_time();
-    filter_queue[index].push(now);
-    filter_queue[index].repeated_filter();
-    uint64_t measured_period = 0;
-    if (filter_queue[index].pop_and_measure(measured_period)) {
+void update_period(int index, uint32_t now) {
+    float measured_period = (now - prev_measures[index]);
+    prev_measures[index] = now;
+    if (measured_period >= 0) {
         //int direction = gpio_get(GPIOB, DIRO) ? 1 : -1;
         periods[index] = alpha * measured_period + (1 - alpha) * periods[index];
         tx_buffer[index] = periods[index];
     }
 }
 
-// EXTI interrupt handler for tacho
-extern "C" void exti15_10_isr(void) {
-    if (exti_get_flag_status(EXTI15)) {
-        update_period(0);
-        exti_reset_request(EXTI15); // Clear the interrupt flag
+static inline uint32_t make_timestamp(uint16_t low) {
+    uint16_t hi1 = TIM_CNT(TIM3);           /* first read                     */
+    uint16_t hi2 = TIM_CNT(TIM3);           /* re-read to see if it changed   */
+
+    /* If hi rolled between reads we need to decide which side the capture
+       happened on.  Heuristic: a capture close to zero certainly happened
+       *after* the overflow, therefore use hi2; else trust hi1. */
+    if (hi1 != hi2) {
+        if (low < 0x8000)                   /* low in first half => after ovf */
+            hi1 = hi2;
     }
-    spi_write(SPI1, tx_buffer[0]);
+    return ((uint32_t)hi1 << 16) | low;
 }
 
-extern "C" void exti4_isr(void) {
-    if (exti_get_flag_status(EXTI4)) {
-        update_period(1);
-        exti_reset_request(EXTI4); // Clear the interrupt flag
+extern "C" void tim2_isr(void) {
+    uint32_t sr = TIM_SR(TIM2);             /* latched once for speed         */
+
+    /* CH1 ------------------------------------------------------------------ */
+    if (sr & TIM_SR_CC1IF) {
+        uint16_t low = TIM_CCR1(TIM2);      /* reading CCR clears CC1IF       */
+        uint32_t captured = make_timestamp(low);
+        update_period(0, captured);
     }
-    spi_write(SPI1, tx_buffer[0]);
-}
-
-extern "C" void exti9_5_isr(void) {
-    if (exti_get_flag_status(EXTI6)) {
-        update_period(2);
-        exti_reset_request(EXTI6); // Clear the interrupt flag
+    /* CH2 ------------------------------------------------------------------ */
+    if (sr & TIM_SR_CC2IF) {
+        uint16_t low = TIM_CCR2(TIM2);
+        uint32_t captured = make_timestamp(low);
+        update_period(1, captured);
     }
-    spi_write(SPI1, tx_buffer[0]);
-}
-
-extern "C" void exti1_isr(void) {
-    if (exti_get_flag_status(EXTI1)) {
-        update_period(3);
-        exti_reset_request(EXTI1); // Clear the interrupt flag
+    /* CH3 ------------------------------------------------------------------ */
+    if (sr & TIM_SR_CC3IF) {
+        uint16_t low = TIM_CCR3(TIM2);
+        uint32_t captured = make_timestamp(low);
+        update_period(2, captured);
     }
-    spi_write(SPI1, tx_buffer[0]);
+    /* CH4 ------------------------------------------------------------------ */
+    if (sr & TIM_SR_CC4IF) {
+        uint16_t low = TIM_CCR4(TIM2);
+        uint32_t captured = make_timestamp(low);
+        update_period(3, captured);
+    }
+    /* We do NOT care about TIM_SR_UIF here – TIM3 handles the overflow.      */
 }
 
-void setup_interrupt(uint32_t port, uint32_t pin, uint32_t exti_line, uint32_t irq) {
-    gpio_set_mode(port, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, pin);
-    exti_select_source(exti_line, port);
-    exti_set_trigger(exti_line, EXTI_TRIGGER_BOTH);
-    exti_enable_request(exti_line);
-    nvic_enable_irq(irq);
-}
-
-void setup_tacho_diro_timers_and_interrupts() {
+void tacho_timers_setup(void) {
+    /* GPIOA 0-3 as floating inputs (TIM2 CH1-CH4) -------------------------- */
+    rcc_periph_clock_enable(RCC_AFIO);
     rcc_periph_clock_enable(RCC_GPIOA);
-    rcc_periph_clock_enable(RCC_GPIOB);
+    gpio_set_mode(GPIOA, GPIO_MODE_INPUT,
+                  GPIO_CNF_INPUT_FLOAT, GPIO0 | GPIO1 | GPIO2 | GPIO3);
+
+    /* Core clocks ---------------------------------------------------------- */
     rcc_periph_clock_enable(RCC_TIM2);
     rcc_periph_clock_enable(RCC_TIM3);
-    rcc_periph_clock_enable(RCC_AFIO);
 
-    // gpio_set_mode(GPIOB, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, DIRO);
+    /* TIM2 – low word, 1 µs tick @ 72 MHz ---------------------------------- */
+    timer_set_prescaler   (TIM2, 72 - 1);           /* 1 MHz               */
+    timer_set_period      (TIM2, 0xFFFF);
+    timer_set_master_mode (TIM2, TIM_CR2_MMS_UPDATE);
 
-    // gpio_set_mode(GPIOB, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, GPIO15);
-    // exti_select_source(EXTI15, GPIOB);
-    // exti_set_trigger(EXTI15, EXTI_TRIGGER_BOTH);
-    // exti_enable_request(EXTI15);
-    // nvic_enable_irq(NVIC_EXTI15_10_IRQ);
+    /* TIM3 – high word, clocks from TIM2 update --------------------------- */
+    timer_set_prescaler   (TIM3, 0);
+    timer_set_period      (TIM3, 0xFFFF);
+    timer_slave_set_trigger(TIM3, TIM_SMCR_TS_ITR1);/* TIM2_TRGO           */
+    timer_slave_set_mode  (TIM3, TIM_SMCR_SMS_ECM1);/* ext-clock mode 1    */
 
-    //setup_interrupt(GPIOB, GPIO15, EXTI15, NVIC_EXTI15_10_IRQ);
-    setup_interrupt(GPIOB, GPIO4, EXTI4, NVIC_EXTI4_IRQ);
-    //setup_interrupt(GPIOB, GPIO6, EXTI6, NVIC_EXTI9_5_IRQ);
-    //setup_interrupt(GPIOA, GPIO1, EXTI1, NVIC_EXTI1_IRQ);
-    
-    timer_set_prescaler(TIM2, 72 - 1);
-    timer_set_period(TIM2, 0xFFFF);
-    timer_set_master_mode(TIM2, TIM_CR2_MMS_UPDATE);
+    /* Digital filter for all captures ------------------------------------- */
+    const tim_ic_filter ic_filter = TIM_IC_CK_INT_N_8;
 
+    /* CH1 */
+    timer_ic_set_input    (TIM2, TIM_IC1, TIM_IC_IN_TI1);
+    timer_ic_set_polarity (TIM2, TIM_IC1, TIM_IC_RISING);
+    timer_ic_set_prescaler(TIM2, TIM_IC1, TIM_IC_PSC_OFF);
+    timer_ic_set_filter   (TIM2, TIM_IC1, ic_filter);
+    timer_ic_enable       (TIM2, TIM_IC1);
+    /* CH2 */
+    timer_ic_set_input    (TIM2, TIM_IC2, TIM_IC_IN_TI2);
+    timer_ic_set_polarity (TIM2, TIM_IC2, TIM_IC_RISING);
+    timer_ic_set_prescaler(TIM2, TIM_IC2, TIM_IC_PSC_OFF);
+    timer_ic_set_filter   (TIM2, TIM_IC2, ic_filter);
+    timer_ic_enable       (TIM2, TIM_IC2);
+    /* CH3 */
+    timer_ic_set_input    (TIM2, TIM_IC3, TIM_IC_IN_TI3);
+    timer_ic_set_polarity (TIM2, TIM_IC3, TIM_IC_RISING);
+    timer_ic_set_prescaler(TIM2, TIM_IC3, TIM_IC_PSC_OFF);
+    timer_ic_set_filter   (TIM2, TIM_IC3, ic_filter);
+    timer_ic_enable       (TIM2, TIM_IC3);
+    /* CH4 */
+    timer_ic_set_input    (TIM2, TIM_IC4, TIM_IC_IN_TI4);
+    timer_ic_set_polarity (TIM2, TIM_IC4, TIM_IC_RISING);
+    timer_ic_set_prescaler(TIM2, TIM_IC4, TIM_IC_PSC_OFF);
+    timer_ic_set_filter   (TIM2, TIM_IC4, ic_filter);
+    timer_ic_enable       (TIM2, TIM_IC4);
 
-    timer_set_prescaler(TIM3, 0);
-    timer_set_period(TIM3, 0xFFFF);
-    timer_slave_set_trigger(TIM3, TIM_SMCR_TS_ITR1);
-    timer_slave_set_mode(TIM3, TIM_SMCR_SMS_ECM1);
+    /* Interrupts ----------------------------------------------------------- */
+    timer_enable_irq(TIM2,
+        TIM_DIER_CC1IE | TIM_DIER_CC2IE | TIM_DIER_CC3IE | TIM_DIER_CC4IE);
+    nvic_enable_irq(NVIC_TIM2_IRQ);
 
+    /* Start counters (high word first) ------------------------------------ */
     timer_enable_counter(TIM3);
     timer_enable_counter(TIM2);
 }
@@ -461,7 +443,7 @@ int main(void) {
     // tacho_diro_interrupt_setup();
     rcc_periph_clock_enable(RCC_GPIOA);
     rcc_periph_clock_enable(RCC_GPIOB);
-    setup_tacho_diro_timers_and_interrupts();
+    tacho_timers_setup();
     for (int i = 0; i < BUFFER_SIZE; i++) {
         rx_buffer[i] = 0.0;
         tx_buffer[i] = 0.0;
@@ -531,6 +513,7 @@ int main(void) {
         // snprintf(buffer, sizeof(buffer), "Period: %d\n", int(period));
         // send(buffer);
 
+        spi_write(SPI1, tx_buffer[0]);
         // only write if the ss is high
         if (gpio_get(GPIOA, GPIO4)) {
            static_assert(BUFFER_SIZE == 4);
@@ -544,7 +527,7 @@ int main(void) {
             // for (int i = 0; i < BUFFER_SIZE; i++) {
             //   tx_buffer[i] = rx_buffer[i];
             // }
-            spi_write(SPI1, tx_buffer[0]);
+            //spi_write(SPI1, tx_buffer[0]);
         }
         //for (int i = 0; i < BUFFER_SIZE; i++) {
         //    tx_buffer[i] = j + i;
