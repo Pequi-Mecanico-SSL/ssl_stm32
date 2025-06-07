@@ -443,6 +443,7 @@ int main(void) {
     // tacho_diro_interrupt_setup();
     rcc_periph_clock_enable(RCC_GPIOA);
     rcc_periph_clock_enable(RCC_GPIOB);
+    rcc_periph_clock_enable(RCC_GPIOC);
     tacho_timers_setup();
     for (int i = 0; i < BUFFER_SIZE; i++) {
         rx_buffer[i] = 0.0;
@@ -452,10 +453,10 @@ int main(void) {
     rcc_periph_clock_enable(RCC_GPIOB);
     
     //set_gpio(DIR, 0);
-    set_gpio(GPIO14, GPIOB, 1);
-    set_gpio(GPIO3, GPIOB, 1);
-    set_gpio(GPIO7, GPIOB, 1);
-    set_gpio(GPIO2, GPIOA, 1);
+    set_gpio(GPIO6, GPIOB, 1);
+    set_gpio(GPIO14, GPIOC, 1);
+    set_gpio(GPIO1, GPIOB, 1);
+    set_gpio(GPIO12, GPIOB, 1);
 
     set_pwm(1, 50);
     set_pwm(2, 50);
