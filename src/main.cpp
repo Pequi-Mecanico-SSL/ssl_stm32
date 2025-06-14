@@ -13,6 +13,7 @@
 #include <string>
 #include <cmath>
 #include <array>
+#include <libopencm3/stm32/i2c.h>
 
 static volatile uint64_t _millis = 0;
 
@@ -430,6 +431,129 @@ static void send(char *msg) {
     }
 }
 
+#define I2C_SLAVE_ADDRESS 0x42
+volatile float rx_buf[4];  /* 16 B written by the Pi  (slave-receive) */
+volatile float tx_buf[4] = {54.0, 22.7, 381, 4001};  /* 16 B read back by the Pi (slave-transmit) */
+
+void restart_rx_dma(void) {
+    dma_disable_channel(DMA1, DMA_CHANNEL7);
+    dma_set_memory_address(DMA1, DMA_CHANNEL7, (uint32_t)rx_buf);
+    dma_set_number_of_data(DMA1, DMA_CHANNEL7, sizeof(rx_buf));
+    dma_enable_channel(DMA1, DMA_CHANNEL7);
+}
+
+void restart_tx_dma(void) {
+    dma_disable_channel(DMA1, DMA_CHANNEL6);
+    dma_set_memory_address(DMA1, DMA_CHANNEL6, (uint32_t)tx_buf);
+    dma_set_number_of_data(DMA1, DMA_CHANNEL6, sizeof(tx_buf));
+    dma_enable_channel(DMA1, DMA_CHANNEL6);
+}
+
+void i2c_gpio_setup(void){
+    /* --- REMAP I2C1 to PB8/PB9 --------------------------------------- */
+    AFIO_MAPR |= AFIO_MAPR_I2C1_REMAP;   /* <-- key change */
+
+    /* PB8 = SCL, PB9 = SDA  –  AF open-drain, 50 MHz */
+    gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_50_MHZ,
+                  GPIO_CNF_OUTPUT_ALTFN_OPENDRAIN, GPIO8 | GPIO9);
+
+    /* both lines high (idle) */
+    gpio_set(GPIOB, GPIO8 | GPIO9);
+}
+
+
+void i2c_setup(void) {
+    i2c_peripheral_disable(I2C1);
+
+    /* 400 kHz fast-mode – but slave ignores timing; master controls speed */
+    i2c_set_clock_frequency(I2C1, 36);
+    i2c_set_fast_mode(I2C1);
+    i2c_set_ccr(I2C1, 36);      /* 400 kHz with 36 MHz PCLK1  */
+    i2c_set_trise(I2C1, 12);
+
+    /* Own address */
+    i2c_set_own_7bit_slave_address(I2C1, I2C_SLAVE_ADDRESS);
+
+    /* Enable DMA requests from I²C1 */
+    I2C_CR2(I2C1) |= I2C_CR2_DMAEN;
+
+    /* Enable interrupts for ADDR and STOP so we know when to restart DMA */
+    I2C_CR2(I2C1) |= I2C_CR2_ITEVTEN;
+    nvic_enable_irq(NVIC_I2C1_EV_IRQ);
+
+    /* Start ready to receive */
+    restart_rx_dma();
+    i2c_peripheral_enable(I2C1);
+    i2c_enable_ack(I2C1);
+}
+
+void i2c_dma_setup(void) {
+    rcc_periph_clock_enable(RCC_AFIO);
+    rcc_periph_clock_enable(RCC_DMA1);
+    rcc_periph_clock_enable(RCC_I2C1);
+
+    /* ---- RX DMA: master writes to us ----------------------------------- */
+    dma_channel_reset(DMA1, DMA_CHANNEL7);      /* I2C1_RX == CH7          */
+    dma_set_peripheral_address(DMA1, DMA_CHANNEL7, (uint32_t)&I2C_DR(I2C1));
+    dma_set_memory_address(DMA1, DMA_CHANNEL7,   (uint32_t)rx_buf);
+    dma_set_number_of_data(DMA1, DMA_CHANNEL7,   sizeof(rx_buf));
+    dma_set_read_from_peripheral(DMA1, DMA_CHANNEL7); /* peripheral->mem   */
+    dma_enable_memory_increment_mode(DMA1, DMA_CHANNEL7);
+    dma_set_peripheral_size(DMA1, DMA_CHANNEL7, DMA_CCR_PSIZE_8BIT);
+    dma_set_memory_size(DMA1, DMA_CHANNEL7,     DMA_CCR_MSIZE_8BIT);
+    dma_set_priority(DMA1, DMA_CHANNEL7,        DMA_CCR_PL_VERY_HIGH);
+    dma_enable_transfer_complete_interrupt(DMA1, DMA_CHANNEL7);
+    nvic_enable_irq(NVIC_DMA1_CHANNEL7_IRQ);
+
+    /* ---- TX DMA: master reads from us ---------------------------------- */
+    dma_channel_reset(DMA1, DMA_CHANNEL6);      /* I2C1_TX == CH6          */
+    dma_set_peripheral_address(DMA1, DMA_CHANNEL6, (uint32_t)&I2C_DR(I2C1));
+    dma_set_memory_address(DMA1, DMA_CHANNEL6,   (uint32_t)tx_buf);
+    dma_set_number_of_data(DMA1, DMA_CHANNEL6,   sizeof(tx_buf));
+    dma_set_read_from_memory(DMA1, DMA_CHANNEL6);     /* mem->peripheral  */
+    dma_enable_memory_increment_mode(DMA1, DMA_CHANNEL6);
+    dma_set_peripheral_size(DMA1, DMA_CHANNEL6,  DMA_CCR_PSIZE_8BIT);
+    dma_set_memory_size(DMA1, DMA_CHANNEL6,      DMA_CCR_MSIZE_8BIT);
+    dma_set_priority(DMA1, DMA_CHANNEL6,         DMA_CCR_PL_VERY_HIGH);
+    dma_enable_transfer_complete_interrupt(DMA1, DMA_CHANNEL6);
+    nvic_enable_irq(NVIC_DMA1_CHANNEL6_IRQ);
+}
+
+
+extern "C" void dma1_channel7_isr(void) {
+    if (dma_get_interrupt_flag(DMA1, DMA_CHANNEL7, DMA_TCIF)) {
+        dma_clear_interrupt_flags(DMA1, DMA_CHANNEL7, DMA_TCIF);
+        dma_disable_channel(DMA1, DMA_CHANNEL7);
+        for (int i = 0; i < 4; ++i) {
+            tx_buf[i] = rx_buf[i] * 2.0f;   /* prepare reply               */
+        }
+    }
+}
+
+extern "C" void dma1_channel6_isr(void) {
+    if (dma_get_interrupt_flag(DMA1, DMA_CHANNEL6, DMA_TCIF)) {
+        dma_clear_interrupt_flags(DMA1, DMA_CHANNEL6, DMA_TCIF);
+        dma_disable_channel(DMA1, DMA_CHANNEL6);
+    }
+}
+
+extern "C" void i2c1_ev_isr(void) {
+    if (I2C_SR1(I2C1) & I2C_SR1_ADDR) {
+        (void)I2C_SR1(I2C1);
+        uint16_t sr2 = I2C_SR2(I2C1);
+        bool master_reading = (sr2 & I2C_SR2_TRA);
+        if (master_reading) {
+            restart_tx_dma();
+        } else {
+            restart_rx_dma();
+        }
+    }
+    if (I2C_SR1(I2C1) & I2C_SR1_STOPF) {
+        (void)I2C_SR1(I2C1);
+        I2C_CR1(I2C1) |= 0;      /* clear STOPF */
+    }
+}
+
 
 int main(void) {
     rcc_clock_setup_pll(&rcc_hse_configs[RCC_CLOCK_HSE8_72MHZ]);
@@ -438,19 +562,22 @@ int main(void) {
     gpio_setup();
     pwm_setup();
     dma_setup();
-    spi_slave_setup();
-    usart_setup();
+    //spi_slave_setup();
+    //usart_setup();
     // tacho_diro_interrupt_setup();
     rcc_periph_clock_enable(RCC_GPIOA);
     rcc_periph_clock_enable(RCC_GPIOB);
     rcc_periph_clock_enable(RCC_GPIOC);
     tacho_timers_setup();
+
+    i2c_gpio_setup();
+    i2c_dma_setup();
+    i2c_setup();
+
     for (int i = 0; i < BUFFER_SIZE; i++) {
         rx_buffer[i] = 0.0;
         tx_buffer[i] = 0.0;
     }
-
-    rcc_periph_clock_enable(RCC_GPIOB);
     
     //set_gpio(DIR, 0);
     set_gpio(GPIO6, GPIOB, 1);
@@ -514,14 +641,14 @@ int main(void) {
         // snprintf(buffer, sizeof(buffer), "Period: %d\n", int(period));
         // send(buffer);
 
-        spi_write(SPI1, tx_buffer[0]);
+        //spi_write(SPI1, tx_buffer[0]);
         // only write if the ss is high
         if (gpio_get(GPIOA, GPIO4)) {
            static_assert(BUFFER_SIZE == 4);
-            set_pwm(1, int(rx_buffer[0]));
-            set_pwm(2, int(rx_buffer[1]));
-            set_pwm(3, int(rx_buffer[2]));
-            set_pwm(4, int(rx_buffer[3]));
+            //set_pwm(1, int(rx_buffer[0]));
+            //set_pwm(2, int(rx_buffer[1]));
+            //set_pwm(3, int(rx_buffer[2]));
+            //set_pwm(4, int(rx_buffer[3]));
             for (int i = 0; i < BUFFER_SIZE; i++) {
                 set_pwm(i + 1, rx_buffer[i]);
             }
