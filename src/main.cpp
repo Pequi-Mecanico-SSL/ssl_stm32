@@ -43,7 +43,7 @@ static void gpio_setup(void) {
 int pwm_timer_period = 1028; // for 70khz
 //int pwm_timer_period = 400; // Period = 1000, for 1 kHz PWM frequency
 void set_pwm(int channel, float duty_cycle) {
-    if (duty_cycle < 0 || duty_cycle > 100) {
+    if (duty_cycle < 25 || duty_cycle > 75) {
         return;
     }
     int value = int((duty_cycle/100.0) * pwm_timer_period);
@@ -257,7 +257,7 @@ void set_gpio(int pin, int port, int state) {
 
 volatile uint32_t prev_measures[4] = {0, 0, 0, 0};
 volatile float periods[4] = {0, 0, 0, 0};
-float alpha = 0.95;
+float alpha = 0.2;
 
 void update_period(int index, uint32_t now) {
     float measured_period = (now - prev_measures[index]);
@@ -265,7 +265,7 @@ void update_period(int index, uint32_t now) {
     if (measured_period >= 0) {
         //int direction = gpio_get(GPIOB, DIRO) ? 1 : -1;
         periods[index] = alpha * measured_period + (1 - alpha) * periods[index];
-        tx_buffer[index] = periods[index];
+        //tx_buffer[index] = periods[index];
     }
 }
 
@@ -432,8 +432,8 @@ static void send(char *msg) {
 }
 
 #define I2C_SLAVE_ADDRESS 0x42
-volatile float rx_buf[4];  /* 16 B written by the Pi  (slave-receive) */
-volatile float tx_buf[4] = {54.0, 22.7, 381, 4001};  /* 16 B read back by the Pi (slave-transmit) */
+volatile float rx_buf[4] = {50.0, 50.0, 50.0, 50.0};  /* 16 B written by the Pi  (slave-receive) */
+volatile float tx_buf[4] = {0.0, 0.0, 0.0, 0.0};  /* 16 B read back by the Pi (slave-transmit) */
 
 void restart_rx_dma(void) {
     dma_disable_channel(DMA1, DMA_CHANNEL7);
@@ -519,14 +519,21 @@ void i2c_dma_setup(void) {
     nvic_enable_irq(NVIC_DMA1_CHANNEL6_IRQ);
 }
 
+// 1/(163.792us)
+
+bool received = false;
+//const float period_to_rpm = 2.5 * std::pow(10, 6);
 
 extern "C" void dma1_channel7_isr(void) {
     if (dma_get_interrupt_flag(DMA1, DMA_CHANNEL7, DMA_TCIF)) {
         dma_clear_interrupt_flags(DMA1, DMA_CHANNEL7, DMA_TCIF);
         dma_disable_channel(DMA1, DMA_CHANNEL7);
         for (int i = 0; i < 4; ++i) {
-            tx_buf[i] = rx_buf[i] * 2.0f;   /* prepare reply               */
+            set_pwm(i + 1, rx_buf[i]);  /* update PWM duty cycles */
+            // tx_buf[i] = (periods[i] == 0 || periods[i] > 50000) ? 0.0 : period_to_rpm / periods[i];
+            tx_buf[i] = periods[i];
         }
+        received = true;
     }
 }
 
@@ -561,7 +568,7 @@ int main(void) {
     systick_setup();
     gpio_setup();
     pwm_setup();
-    dma_setup();
+    //dma_setup();
     //spi_slave_setup();
     //usart_setup();
     // tacho_diro_interrupt_setup();
@@ -600,7 +607,11 @@ int main(void) {
     // float offset = 47;
     // float freq = 0.05;
     while (1) {
-        gpio_toggle(GPIOC, GPIO13);
+        if (!received) {
+            gpio_toggle(GPIOC, GPIO13);
+        } else {
+            gpio_set(GPIOC, GPIO13);
+        }
         //gpio_toggle(GPIOB, BRAKE);
         delay(50);
 
@@ -643,20 +654,20 @@ int main(void) {
 
         //spi_write(SPI1, tx_buffer[0]);
         // only write if the ss is high
-        if (gpio_get(GPIOA, GPIO4)) {
-           static_assert(BUFFER_SIZE == 4);
-            //set_pwm(1, int(rx_buffer[0]));
-            //set_pwm(2, int(rx_buffer[1]));
-            //set_pwm(3, int(rx_buffer[2]));
-            //set_pwm(4, int(rx_buffer[3]));
-            for (int i = 0; i < BUFFER_SIZE; i++) {
-                set_pwm(i + 1, rx_buffer[i]);
-            }
-            // for (int i = 0; i < BUFFER_SIZE; i++) {
-            //   tx_buffer[i] = rx_buffer[i];
-            // }
-            //spi_write(SPI1, tx_buffer[0]);
-        }
+        // if (gpio_get(GPIOA, GPIO4)) {
+        //    static_assert(BUFFER_SIZE == 4);
+        //     //set_pwm(1, int(rx_buffer[0]));
+        //     //set_pwm(2, int(rx_buffer[1]));
+        //     //set_pwm(3, int(rx_buffer[2]));
+        //     //set_pwm(4, int(rx_buffer[3]));
+        //     for (int i = 0; i < BUFFER_SIZE; i++) {
+        //         set_pwm(i + 1, rx_buffer[i]);
+        //     }
+        //     // for (int i = 0; i < BUFFER_SIZE; i++) {
+        //     //   tx_buffer[i] = rx_buffer[i];
+        //     // }
+        //     //spi_write(SPI1, tx_buffer[0]);
+        // }
         //for (int i = 0; i < BUFFER_SIZE; i++) {
         //    tx_buffer[i] = j + i;
         //}
