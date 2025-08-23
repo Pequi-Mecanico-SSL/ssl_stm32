@@ -14,6 +14,7 @@
 #include <cmath>
 #include <array>
 #include <libopencm3/stm32/i2c.h>
+#include <limits>
 
 static volatile uint64_t _millis = 0;
 
@@ -433,7 +434,10 @@ static void send(char *msg) {
 
 #define I2C_SLAVE_ADDRESS 0x42
 volatile float rx_buf[4] = {50.0, 50.0, 50.0, 50.0};  /* 16 B written by the Pi  (slave-receive) */
-volatile float tx_buf[4] = {0.0, 0.0, 0.0, 0.0};  /* 16 B read back by the Pi (slave-transmit) */
+volatile float tx_buf[4] = {std::numeric_limits<float>::max(),
+                            std::numeric_limits<float>::max(),
+                            std::numeric_limits<float>::max(),
+                            std::numeric_limits<float>::max()};  /* 16 B read by the Pi (master-transmit) */
 
 void restart_rx_dma(void) {
     dma_disable_channel(DMA1, DMA_CHANNEL7);
@@ -528,12 +532,10 @@ extern "C" void dma1_channel7_isr(void) {
     if (dma_get_interrupt_flag(DMA1, DMA_CHANNEL7, DMA_TCIF)) {
         dma_clear_interrupt_flags(DMA1, DMA_CHANNEL7, DMA_TCIF);
         dma_disable_channel(DMA1, DMA_CHANNEL7);
-        for (int i = 0; i < 4; ++i) {
-            set_pwm(i + 1, rx_buf[i]);  /* update PWM duty cycles */
-            // tx_buf[i] = (periods[i] == 0 || periods[i] > 50000) ? 0.0 : period_to_rpm / periods[i];
-            tx_buf[i] = periods[i];
-        }
         received = true;
+        for (int i = 0; i < 4; ++i) {
+            set_pwm(i + 1, rx_buf[i]);
+        }
     }
 }
 
@@ -549,15 +551,24 @@ extern "C" void i2c1_ev_isr(void) {
         (void)I2C_SR1(I2C1);
         uint16_t sr2 = I2C_SR2(I2C1);
         bool master_reading = (sr2 & I2C_SR2_TRA);
+
         if (master_reading) {
+            // --- SNAPSHOT reply before enabling TX DMA ---
+            for (int i = 0; i < 4; ++i) {
+                //tx_buf[i] = periods[i];
+                if (periods[i] != 0) {
+                    tx_buf[i] = (2.5 * 10e6) /  periods[i];
+                }
+            }
             restart_tx_dma();
         } else {
             restart_rx_dma();
         }
     }
+
     if (I2C_SR1(I2C1) & I2C_SR1_STOPF) {
         (void)I2C_SR1(I2C1);
-        I2C_CR1(I2C1) |= 0;      /* clear STOPF */
+        I2C_CR1(I2C1) = I2C_CR1(I2C1); // clear STOPF
     }
 }
 
@@ -580,11 +591,6 @@ int main(void) {
     i2c_gpio_setup();
     i2c_dma_setup();
     i2c_setup();
-
-    for (int i = 0; i < BUFFER_SIZE; i++) {
-        rx_buffer[i] = 0.0;
-        tx_buffer[i] = 0.0;
-    }
     
     //set_gpio(DIR, 0);
     set_gpio(GPIO6, GPIOB, 1);
@@ -596,10 +602,6 @@ int main(void) {
     set_pwm(2, 50);
     set_pwm(3, 50);
     set_pwm(4, 50);
-    rx_buffer[0] = 50;
-    rx_buffer[1] = 50;
-    rx_buffer[2] = 50;
-    rx_buffer[3] = 50;
 
     // int vals[] = {0, 200, 400, 600};
     // int j = 1;
