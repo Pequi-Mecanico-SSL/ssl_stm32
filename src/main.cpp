@@ -35,6 +35,10 @@ void delay(uint32_t ms) {
     while (_millis < until);
 }
 
+uint64_t now_ms() {
+    return _millis;
+}
+
 static void gpio_setup(void) {
     rcc_periph_clock_enable(RCC_GPIOC);
     gpio_set_mode(GPIOC, GPIO_MODE_OUTPUT_2_MHZ,
@@ -258,7 +262,7 @@ void set_gpio(int pin, int port, int state) {
 
 volatile uint32_t prev_measures[4] = {0, 0, 0, 0};
 volatile float periods[4] = {0, 0, 0, 0};
-float alpha = 0.2;
+float alpha = 0.9;
 
 void update_period(int index, uint32_t now) {
     float measured_period = (now - prev_measures[index]);
@@ -291,7 +295,7 @@ extern "C" void tim2_isr(void) {
     if (sr & TIM_SR_CC1IF) {
         uint16_t low = TIM_CCR1(TIM2);      /* reading CCR clears CC1IF       */
         uint32_t captured = make_timestamp(low);
-        update_period(0, captured);
+        update_period(2, captured);
     }
     /* CH2 ------------------------------------------------------------------ */
     if (sr & TIM_SR_CC2IF) {
@@ -303,7 +307,7 @@ extern "C" void tim2_isr(void) {
     if (sr & TIM_SR_CC3IF) {
         uint16_t low = TIM_CCR3(TIM2);
         uint32_t captured = make_timestamp(low);
-        update_period(2, captured);
+        update_period(0, captured);
     }
     /* CH4 ------------------------------------------------------------------ */
     if (sr & TIM_SR_CC4IF) {
@@ -557,7 +561,8 @@ extern "C" void i2c1_ev_isr(void) {
             for (int i = 0; i < 4; ++i) {
                 //tx_buf[i] = periods[i];
                 if (periods[i] != 0) {
-                    tx_buf[i] = (2.5 * 10e6) /  periods[i];
+                    float rpm = (2.5 * 10e6) /  periods[i];
+                    tx_buf[i] = (2 * M_PI * rpm) / 60.0; // rad/s
                 }
             }
             restart_tx_dma();
