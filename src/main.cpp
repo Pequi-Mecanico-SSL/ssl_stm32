@@ -598,10 +598,10 @@ int main(void) {
     i2c_setup();
     
     //set_gpio(DIR, 0);
-    set_gpio(GPIO6, GPIOB, 1);
+    set_gpio(GPIO7, GPIOA, 1);
+    set_gpio(GPIO12, GPIOA, 1);
     set_gpio(GPIO14, GPIOC, 1);
-    set_gpio(GPIO1, GPIOB, 1);
-    set_gpio(GPIO12, GPIOB, 1);
+    set_gpio(GPIO15, GPIOC, 1);
 
     set_pwm(1, 50);
     set_pwm(2, 50);
