@@ -45,24 +45,33 @@ static void gpio_setup(void) {
                   GPIO_CNF_OUTPUT_PUSHPULL, GPIO13);
 }
 
+volatile int wheel_direction[4] = {1, 1, 1, 1};
+
 int pwm_timer_period = 1028; // for 70khz
 //int pwm_timer_period = 400; // Period = 1000, for 1 kHz PWM frequency
 void set_pwm(int channel, float duty_cycle) {
-    if (duty_cycle < 25 || duty_cycle > 75) {
-        return;
+    if (duty_cycle < 25) {
+        duty_cycle = 25;
+    } else if (duty_cycle > 75) {
+        duty_cycle = 75;
+    }
+    if (duty_cycle > 50) {
+        wheel_direction[channel] = 1;
+    } else if (duty_cycle < 50) {
+        wheel_direction[channel] = -1;
     }
     int value = int((duty_cycle/100.0) * pwm_timer_period);
     switch (channel) {
-        case 1:
+        case 3:
             timer_set_oc_value(TIM1, TIM_OC1, value);
             break;
-        case 2:
+        case 0:
             timer_set_oc_value(TIM1, TIM_OC2, value);
             break;
-        case 3:
+        case 2:
             timer_set_oc_value(TIM1, TIM_OC3, value);
             break;
-        case 4:
+        case 1:
             timer_set_oc_value(TIM1, TIM_OC4, value);
             break;
         default:
@@ -88,22 +97,22 @@ void pwm_setup(void) {
     timer_set_oc_mode(TIM1, TIM_OC1, TIM_OCM_PWM1);
     timer_enable_oc_output(TIM1, TIM_OC1);  // Enable output compare on channel 1
     // timer_set_oc_value(TIM1, TIM_OC1, int(0 * (freq/100.0)));  // duty cycle
-    set_pwm(1, 50);
+    set_pwm(3, 50);
 
     // Channel 2 on PA9
     timer_set_oc_mode(TIM1, TIM_OC2, TIM_OCM_PWM1);
     timer_enable_oc_output(TIM1, TIM_OC2);  // Enable output compare on channel 2
-    set_pwm(2, 50);  // duty cycle
+    set_pwm(0, 50);  // duty cycle
 
     // Channel 3 on PA10
     timer_set_oc_mode(TIM1, TIM_OC3, TIM_OCM_PWM1);
     timer_enable_oc_output(TIM1, TIM_OC3);  // Enable output compare on channel 3
-    set_pwm(3, 50);  // duty cycle
+    set_pwm(2, 50);  // duty cycle
 
     // Channel 4 on PA11
     timer_set_oc_mode(TIM1, TIM_OC4, TIM_OCM_PWM1);
     timer_enable_oc_output(TIM1, TIM_OC4);  // Enable output compare on channel 4
-    set_pwm(4, 50);  // duty cycle
+    set_pwm(1, 50);  // duty cycle
 
     // Enable Timer1 counter and output
     timer_enable_preload(TIM1);
@@ -262,16 +271,43 @@ void set_gpio(int pin, int port, int state) {
 
 volatile uint32_t prev_measures[4] = {0, 0, 0, 0};
 volatile float periods[4] = {0, 0, 0, 0};
+volatile int latest_period[4] = {0, 0, 0, 0};
 float alpha = 0.9;
+
+static const uint32_t STOPPED_TIMEOUT_US = 500000;   // 0.5s, considered stopped if no pulse in this time
 
 void update_period(int index, uint32_t now) {
     float measured_period = (now - prev_measures[index]);
     prev_measures[index] = now;
     if (measured_period >= 0) {
-        //int direction = gpio_get(GPIOB, DIRO) ? 1 : -1;
         periods[index] = alpha * measured_period + (1 - alpha) * periods[index];
-        //tx_buffer[index] = periods[index];
     }
+}
+
+static inline uint32_t micros_now() {
+    uint16_t hi1 = TIM_CNT(TIM3);
+    uint16_t lo  = TIM_CNT(TIM2);
+    uint16_t hi2 = TIM_CNT(TIM3);
+    if (hi1 != hi2 && lo < 0x8000) hi1 = hi2;   // overflow between reads
+    return ((uint32_t)hi1 << 16) | lo;
+}
+
+float wheel_speed(int index) {
+    uint32_t now  = micros_now();
+    uint32_t time_since_update = now - prev_measures[index];
+
+    if (time_since_update > STOPPED_TIMEOUT_US) {
+        periods[index] = 0;
+        return 0.0;
+    }
+    
+    float period = periods[index];
+    if (time_since_update > period) {
+        period = (float) time_since_update;
+    }
+
+    float rpm = (2.5 * 10e6) /  period;
+    return (2 * M_PI * wheel_direction[index] * rpm) / 60.0; // rad/s
 }
 
 static inline uint32_t make_timestamp(uint16_t low) {
@@ -295,7 +331,7 @@ extern "C" void tim2_isr(void) {
     if (sr & TIM_SR_CC1IF) {
         uint16_t low = TIM_CCR1(TIM2);      /* reading CCR clears CC1IF       */
         uint32_t captured = make_timestamp(low);
-        update_period(2, captured);
+        update_period(0, captured);
     }
     /* CH2 ------------------------------------------------------------------ */
     if (sr & TIM_SR_CC2IF) {
@@ -307,7 +343,7 @@ extern "C" void tim2_isr(void) {
     if (sr & TIM_SR_CC3IF) {
         uint16_t low = TIM_CCR3(TIM2);
         uint32_t captured = make_timestamp(low);
-        update_period(0, captured);
+        update_period(2, captured);
     }
     /* CH4 ------------------------------------------------------------------ */
     if (sr & TIM_SR_CC4IF) {
@@ -438,10 +474,7 @@ static void send(char *msg) {
 
 #define I2C_SLAVE_ADDRESS 0x42
 volatile float rx_buf[4] = {50.0, 50.0, 50.0, 50.0};  /* 16 B written by the Pi  (slave-receive) */
-volatile float tx_buf[4] = {std::numeric_limits<float>::max(),
-                            std::numeric_limits<float>::max(),
-                            std::numeric_limits<float>::max(),
-                            std::numeric_limits<float>::max()};  /* 16 B read by the Pi (master-transmit) */
+volatile float tx_buf[4] = {0, 0, 0, 0};  /* 16 B read by the Pi (master-transmit) */
 
 void restart_rx_dma(void) {
     dma_disable_channel(DMA1, DMA_CHANNEL7);
@@ -538,7 +571,7 @@ extern "C" void dma1_channel7_isr(void) {
         dma_disable_channel(DMA1, DMA_CHANNEL7);
         received = true;
         for (int i = 0; i < 4; ++i) {
-            set_pwm(i + 1, rx_buf[i]);
+            set_pwm(i, rx_buf[i]);
         }
     }
 }
@@ -559,11 +592,7 @@ extern "C" void i2c1_ev_isr(void) {
         if (master_reading) {
             // --- SNAPSHOT reply before enabling TX DMA ---
             for (int i = 0; i < 4; ++i) {
-                //tx_buf[i] = periods[i];
-                if (periods[i] != 0) {
-                    float rpm = (2.5 * 10e6) /  periods[i];
-                    tx_buf[i] = (2 * M_PI * rpm) / 60.0; // rad/s
-                }
+                tx_buf[i] = wheel_speed(i);
             }
             restart_tx_dma();
         } else {
@@ -603,10 +632,10 @@ int main(void) {
     set_gpio(GPIO14, GPIOC, 1);
     set_gpio(GPIO15, GPIOC, 1);
 
+    set_pwm(0, 50);
     set_pwm(1, 50);
     set_pwm(2, 50);
     set_pwm(3, 50);
-    set_pwm(4, 50);
 
     // int vals[] = {0, 200, 400, 600};
     // int j = 1;
